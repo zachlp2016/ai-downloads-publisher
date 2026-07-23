@@ -1,5 +1,12 @@
 # Downloads Publisher Mac Lane Handoff
 
+Canonical repository:
+
+```text
+git@github.com:zachlp2016/ai-downloads-publisher.git
+https://github.com/zachlp2016/ai-downloads-publisher
+```
+
 The tested local publisher implementation is committed on `main` at
 `f42d1fb`. It adds two lane-explicit products without changing the existing
 Debian paths:
