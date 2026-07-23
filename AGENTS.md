@@ -1,4 +1,4 @@
-# Downloads Publisher Mac Lane Handoff
+# Downloads Publisher Handoff
 
 Canonical repository:
 
@@ -7,49 +7,49 @@ git@github.com:zachlp2016/ai-downloads-publisher.git
 https://github.com/zachlp2016/ai-downloads-publisher
 ```
 
-The tested local publisher implementation is committed on `main` at
-`f42d1fb`. It adds two lane-explicit products without changing the existing
-Debian paths:
+This is the shared publisher for TOF Terminal and Agent Node downloads. Do not
+split operating systems into separate publisher repositories. Keep product
+lanes in `config.json`, require a unique public path for every lane, and keep
+qualification fail-closed.
+
+Current source commits:
 
 ```text
-terminal/macos       -> /terminal/macos/
-node-adapters/macos  -> /node-adapters/macos/
-```
-
-Current qualified source commits:
-
-```text
-TOF-Terminal  86e59fffe092448f4931edf8954b82acefc0635d
+TOF Terminal  86e59fffe092448f4931edf8954b82acefc0635d
 Agent Node    82b38647cc7feac1ce629a97168ff6f6a82f0582
 ```
 
-The native candidate receipts live under `candidates/`. The publisher validates
-the exact Git commit/tree, Mac runtime profile, Python lock, 108-package Aider
-lock, external browser payload hashes, Agent Node composite provenance, and
-published Mac Terminal binding. Only the publisher writes final publication
-receipts. Do not change either repository's truthful `published: false` source
-state.
+The publisher host is Debian 13 amd64. It may run only the lane declared native
+for that host. Any other target requires a trusted exact-commit candidate from
+that target, a VM, a container, or CI. Never label shared tests or another
+distribution's runtime files as target-native evidence.
 
-Local verification completed:
+The configured Ubuntu 24.04 LTS lanes intentionally remain unpublished until
+the product repositories contain their Ubuntu runtime profiles and hash locks
+and matching candidate receipts are installed. Supporting another future
+distribution should be a configuration-and-evidence change whenever the
+generic qualification modes are sufficient.
+
+Platform-specific paths are security boundaries:
 
 ```text
-publisher unit tests                         6 passed
-Python syntax                                passed
-config JSON                                  passed
-real deterministic Terminal archive         0525488df7d955a2ebc30c5c4a8c9a8d16e43c3eb2e475b254279ae9e106fc03
-real deterministic Agent Node archive       6ce19ccd3d29ed617deffbe63af6a6a73bc30bca91d018de8d9ae0cacc3e0c24
-Debian manifests during Mac dry run          byte-identical
-rendered Mac installer shell syntax          passed
+/terminal/<lane>/releases/<commit>/
+/node-adapters/<lane>/releases/<commit>/
 ```
 
-No public release has been claimed. The configured host is `secure-vfio`
-(`192.168.10.69`, existing `~/.ssh/libvirt_key`), but it returned
-`connection refused` on port 22 on 2026-07-23. When it is reachable, deploy the
-exact committed files using `README.md`, publish `terminal-macos` first, then
-`node-adapters-macos`, and verify both public `--verify-only` paths before any
-real installation.
+The historical Debian paths remain `/terminal/` and `/node-adapters/` for
+compatibility. Never let one lane write another lane's manifest, installer, or
+immutable release directory.
 
-Never route Mac archives through `/terminal/releases/` or
-`/node-adapters/releases/`. Mac immutable files live below each
-`/macos/releases/<commit>/` tree, and Mac promotion must leave Debian pointers
-byte-identical.
+Before deployment:
+
+```text
+publisher unit tests       must pass
+Python syntax              must pass
+config and receipts        must parse as JSON
+systemd units              must verify
+installed files            must match the committed files
+```
+
+Publish Terminal before Agent Node for the same lane because Agent Node binds
+the exact published Terminal archive, runtime profile, and Python lock.

@@ -11,21 +11,44 @@
     "terminal": {
       "product": "terminal",
       "qualification_lane": "debian",
+      "qualification_mode": "publisher_native",
+      "qualification_label": "Debian 13 amd64 with CPython 3.13",
       "repository_ssh": "git@github.com:zachlp2016/TOF-Terminal.git",
       "repository_https": "https://github.com/zachlp2016/TOF-Terminal",
       "ref": "refs/heads/main",
       "public_path": "terminal",
-      "archive_prefix": "tof-terminal"
+      "archive_prefix": "tof-terminal",
+      "runtime": {
+        "profile_id": "debian-13-amd64-python3.13",
+        "profile_path": "runtime/debian-13-amd64.json",
+        "python_lock_path": "runtime/python-debian13-amd64-py313.lock",
+        "expected_platform": {
+          "os_release_id": "debian",
+          "os_release_version_id": "13",
+          "architecture": "amd64",
+          "uname_machine": "x86_64",
+          "python_implementation": "CPython",
+          "python_version": "3.13"
+        }
+      }
     },
     "node-adapters": {
       "product": "node-adapters",
       "qualification_lane": "debian",
+      "qualification_mode": "publisher_native",
+      "qualification_label": "Debian 13 amd64",
       "repository_ssh": "git@github.com:zachlp2016/techoverfl-agent-node.git",
       "repository_https": "https://github.com/zachlp2016/techoverfl-agent-node",
       "ref": "refs/heads/main",
       "public_path": "node-adapters",
       "archive_prefix": "tof-agent-node",
-      "debian_test_files": [
+      "expected_host": {
+        "os_release_id": "debian",
+        "os_release_version_id": "13",
+        "uname_machine": "x86_64"
+      },
+      "terminal_binding_path": "components/tof-terminal/debian-13-amd64.json",
+      "test_files": [
         "test/api/v1/files_controller.test.js",
         "test/bin/research_tools_runner.test.js",
         "test/bin/tool_execution_runner.test.js",
@@ -50,25 +73,103 @@
         "test/tools/request_validator.test.js"
       ]
     },
+    "terminal-ubuntu": {
+      "product": "terminal",
+      "qualification_lane": "ubuntu",
+      "qualification_mode": "trusted_candidate",
+      "qualification_label": "Ubuntu 24.04 LTS amd64 with CPython 3.12",
+      "repository_ssh": "git@github.com:zachlp2016/TOF-Terminal.git",
+      "repository_https": "https://github.com/zachlp2016/TOF-Terminal",
+      "ref": "refs/heads/main",
+      "public_path": "terminal/ubuntu",
+      "installer_template_public_path": "terminal/install.sh",
+      "archive_prefix": "tof-terminal",
+      "runtime": {
+        "profile_id": "ubuntu-24.04-amd64-python3.12",
+        "profile_path": "runtime/ubuntu-24.04-amd64.json",
+        "python_lock_path": "runtime/python-ubuntu2404-amd64-py312.lock",
+        "expected_platform": {
+          "os_release_id": "ubuntu",
+          "os_release_version_id": "24.04",
+          "architecture": "amd64",
+          "uname_machine": "x86_64",
+          "python_implementation": "CPython",
+          "python_version": "3.12"
+        }
+      }
+    },
+    "node-adapters-ubuntu": {
+      "product": "node-adapters",
+      "qualification_lane": "ubuntu",
+      "qualification_mode": "trusted_candidate",
+      "qualification_label": "Ubuntu 24.04 LTS amd64",
+      "repository_ssh": "git@github.com:zachlp2016/techoverfl-agent-node.git",
+      "repository_https": "https://github.com/zachlp2016/techoverfl-agent-node",
+      "ref": "refs/heads/main",
+      "public_path": "node-adapters/ubuntu",
+      "installer_template_public_path": "node-adapters/install.sh",
+      "archive_prefix": "tof-agent-node",
+      "terminal_public_path": "terminal/ubuntu",
+      "terminal_profile_id": "ubuntu-24.04-amd64-python3.12"
+    },
     "terminal-macos": {
       "product": "terminal",
       "qualification_lane": "macos",
+      "qualification_mode": "trusted_candidate",
+      "qualification_label": "macOS 26 arm64 with CPython 3.14",
       "repository_ssh": "git@github.com:zachlp2016/TOF-Terminal.git",
       "repository_https": "https://github.com/zachlp2016/TOF-Terminal",
       "ref": "refs/heads/main",
       "public_path": "terminal/macos",
       "installer_template_public_path": "terminal/install.sh",
-      "archive_prefix": "tof-terminal"
+      "archive_prefix": "tof-terminal",
+      "portable_checksum": true,
+      "runtime": {
+        "profile_id": "macos-26-arm64-python3.14",
+        "profile_path": "runtime/macos-26-arm64.json",
+        "python_lock_path": "runtime/python-macos26-arm64-py314.lock",
+        "expected_platform": {
+          "os_release_id": "macos",
+          "os_release_version_id": "26",
+          "architecture": "arm64",
+          "uname_machine": "arm64",
+          "python_implementation": "CPython",
+          "python_version": "3.14"
+        },
+        "aider": {
+          "requirements_path": "runtime/component-requirements.json",
+          "lock_path": "runtime/aider-macos-arm64-py312.lock",
+          "component_id": "aider",
+          "version": "0.86.2",
+          "python_version": "3.12",
+          "format": "uv-requirements",
+          "hash_mode": "required",
+          "binary_only": true,
+          "platform": "macos-arm64"
+        }
+      }
     },
     "node-adapters-macos": {
       "product": "node-adapters",
       "qualification_lane": "macos",
+      "qualification_mode": "trusted_candidate",
+      "qualification_label": "macOS 26 arm64",
       "repository_ssh": "git@github.com:zachlp2016/techoverfl-agent-node.git",
       "repository_https": "https://github.com/zachlp2016/techoverfl-agent-node",
       "ref": "refs/heads/main",
       "public_path": "node-adapters/macos",
       "installer_template_public_path": "node-adapters/install.sh",
-      "archive_prefix": "tof-agent-node"
+      "archive_prefix": "tof-agent-node",
+      "portable_checksum": true,
+      "terminal_public_path": "terminal/macos",
+      "terminal_profile_id": "macos-26-arm64-python3.14",
+      "provenance": {
+        "status": "source_sync_only",
+        "published": false,
+        "release_status": "unpublished",
+        "aider_package_count": 108,
+        "aider_install_contract": "uv-pip-require-hashes-strict-binary-only"
+      }
     }
   }
 }

@@ -26,6 +26,7 @@ from urllib.parse import unquote, urlparse
 DEFAULT_CONFIG = "/etc/techoverfl-publisher/config.json"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 HEX256_RE = re.compile(r"^[0-9a-f]{64}$")
+LANE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 SECRET_PATTERNS = (
     re.compile(rb"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"),
     re.compile(rb"AKIA[0-9A-Z]{16}"),
@@ -108,6 +109,15 @@ def bounded_output(output: str, maximum: int = 6000) -> str:
     return clean if len(clean) <= maximum else clean[-maximum:]
 
 
+def relative_path(value: Any, label: str) -> Path:
+    if not isinstance(value, str) or not value:
+        raise PublisherError(f"{label} must be a non-empty relative path")
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts or "." in path.parts:
+        raise PublisherError(f"{label} is unsafe: {value!r}")
+    return path
+
+
 class Publisher:
     def __init__(self, config_path: Path) -> None:
         self.config_path = config_path
@@ -133,19 +143,51 @@ class Publisher:
         if not isinstance(products, dict) or not products:
             raise PublisherError("products must be a non-empty object")
         self.products: dict[str, dict[str, Any]] = products
+        public_paths: set[str] = set()
         for name, product in self.products.items():
             if not isinstance(product, dict):
                 raise PublisherError(f"product {name} must be an object")
             if product.get("product") not in {"terminal", "node-adapters"}:
                 raise PublisherError(f"product {name} has an invalid product type")
-            if product.get("qualification_lane") not in {"debian", "macos"}:
+            lane = product.get("qualification_lane")
+            if not isinstance(lane, str) or not LANE_RE.fullmatch(lane):
                 raise PublisherError(f"product {name} has an invalid qualification lane")
-            expected_suffix = "/macos" if product["qualification_lane"] == "macos" else ""
-            expected_path = str(product["product"]) + expected_suffix
-            if product.get("public_path") != expected_path:
+            if product.get("qualification_mode") not in {
+                "publisher_native",
+                "trusted_candidate",
+            }:
+                raise PublisherError(f"product {name} has an invalid qualification mode")
+            public_path = relative_path(
+                product.get("public_path"), f"product {name} public_path"
+            )
+            if public_path.parts[0] != product["product"]:
                 raise PublisherError(
-                    f"product {name} public_path must be {expected_path!r}"
+                    f"product {name} public_path must remain below {product['product']!r}"
                 )
+            rendered_public_path = public_path.as_posix()
+            if rendered_public_path in public_paths:
+                raise PublisherError(
+                    f"product {name} duplicates public path {rendered_public_path!r}"
+                )
+            public_paths.add(rendered_public_path)
+            if not isinstance(product.get("qualification_label"), str):
+                raise PublisherError(f"product {name} qualification_label is missing")
+            if product["product"] == "terminal":
+                runtime = product.get("runtime")
+                if not isinstance(runtime, dict):
+                    raise PublisherError(f"product {name} runtime configuration is missing")
+                relative_path(
+                    runtime.get("profile_path"),
+                    f"product {name} runtime profile_path",
+                )
+                relative_path(
+                    runtime.get("python_lock_path"),
+                    f"product {name} runtime python_lock_path",
+                )
+                if not isinstance(runtime.get("expected_platform"), dict):
+                    raise PublisherError(
+                        f"product {name} runtime expected_platform is missing"
+                    )
         try:
             self.user_record = pwd.getpwnam(self.run_as_user)
         except KeyError as exc:
@@ -398,7 +440,7 @@ class Publisher:
                 detail += f": {gap}"
             raise QualificationError(detail)
 
-    def macos_candidate_gate(
+    def candidate_gate(
         self,
         name: str,
         product: dict[str, Any],
@@ -411,7 +453,7 @@ class Publisher:
             or stat.S_IMODE(path.stat().st_mode) & 0o022
         ):
             raise QualificationError(
-                f"trusted native-Mac candidate is missing or unsafe: {path}"
+                f"trusted {product['qualification_lane']} candidate is missing or unsafe: {path}"
             )
         document = load_json(path)
         qualification = document.get("qualification")
@@ -419,16 +461,16 @@ class Publisher:
             "schema_version": 1,
             "status": "qualified_candidate",
             "product": product["product"],
-            "qualification_lane": "macos",
+            "qualification_lane": product["qualification_lane"],
             "source_commit": commit,
         }
         for key, value in expected.items():
             if document.get(key) != value:
                 raise QualificationError(
-                    f"native-Mac candidate mismatch for {key}: {document.get(key)!r}"
+                    f"trusted candidate mismatch for {key}: {document.get(key)!r}"
                 )
         if not isinstance(qualification, dict) or qualification.get("status") != "passed":
-            raise QualificationError("native-Mac candidate qualification did not pass")
+            raise QualificationError("trusted candidate qualification did not pass")
         document["_candidate_sha256"] = sha256_file(path)
         return document
 
@@ -439,34 +481,94 @@ class Publisher:
             os.chown(path, self.user_record.pw_uid, self.user_record.pw_gid)
         return path
 
-    def qualify_terminal(self, checkout: Path) -> dict[str, Any]:
-        profile_path = checkout / "runtime" / "debian-13-amd64.json"
-        lock_path = checkout / "runtime" / "python-debian13-amd64-py313.lock"
+    def terminal_runtime_inputs(
+        self,
+        checkout: Path,
+        product: dict[str, Any],
+    ) -> tuple[dict[str, Any], Path, Path, str, str]:
+        runtime = product["runtime"]
+        profile_relative = relative_path(
+            runtime["profile_path"], "runtime profile_path"
+        ).as_posix()
+        lock_relative = relative_path(
+            runtime["python_lock_path"], "runtime python_lock_path"
+        ).as_posix()
+        profile_path = checkout / profile_relative
+        lock_path = checkout / lock_relative
         if (
             not profile_path.is_file()
             or profile_path.is_symlink()
             or not lock_path.is_file()
             or lock_path.is_symlink()
         ):
-            raise QualificationError("Debian runtime profile or Python hash lock is missing")
+            raise QualificationError(
+                f"{product['qualification_label']} runtime profile or Python hash lock is missing"
+            )
         profile = load_json(profile_path)
         platform = profile.get("platform")
         if not isinstance(platform, dict):
-            raise QualificationError("Debian runtime profile platform is invalid")
-        expected = {
-            "os_release_id": "debian",
-            "os_release_version_id": "13",
-            "architecture": "amd64",
-            "python_implementation": "CPython",
-            "python_version": "3.13",
-        }
-        for key, value in expected.items():
+            raise QualificationError("runtime profile platform is invalid")
+        for key, value in runtime["expected_platform"].items():
             if platform.get(key) != value:
                 raise QualificationError(
-                    f"Debian runtime profile mismatch for {key}: {platform.get(key)!r}"
+                    f"runtime profile mismatch for {key}: {platform.get(key)!r}"
+                )
+        expected_profile = runtime.get("profile_id")
+        if isinstance(expected_profile, str) and profile.get("profile") != expected_profile:
+            raise QualificationError("runtime profile id is inconsistent")
+        python_config = profile.get("python")
+        if (
+            not isinstance(python_config, dict)
+            or python_config.get("lock_file") != lock_relative
+        ):
+            raise QualificationError("runtime profile does not bind its Python lock")
+        declared_lock_sha = python_config.get("lock_sha256")
+        if isinstance(declared_lock_sha, str) and declared_lock_sha != sha256_file(lock_path):
+            raise QualificationError("runtime profile Python lock hash is inconsistent")
+        return profile, profile_path, lock_path, profile_relative, lock_relative
+
+    def validate_native_host(self, product: dict[str, Any]) -> None:
+        expected = product.get("expected_host")
+        if not isinstance(expected, dict):
+            expected = product.get("runtime", {}).get("expected_platform")
+        if not isinstance(expected, dict):
+            raise PublisherError("native qualification expected_host is missing")
+        os_release: dict[str, str] = {}
+        try:
+            for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    os_release[key] = value.strip().strip('"')
+        except OSError as exc:
+            raise PublisherError(f"cannot inspect native publisher host: {exc}") from exc
+        actual = {
+            "os_release_id": os_release.get("ID"),
+            "os_release_version_id": os_release.get("VERSION_ID"),
+            "uname_machine": os.uname().machine,
+        }
+        for key in actual:
+            if key in expected and actual[key] != expected[key]:
+                raise QualificationError(
+                    f"publisher host does not match {product['qualification_label']} "
+                    f"for {key}: {actual[key]!r}"
                 )
 
-        venv = self.state_root / "venvs" / "terminal"
+    def qualify_terminal_native(
+        self,
+        name: str,
+        checkout: Path,
+        product: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.validate_native_host(product)
+        (
+            profile,
+            profile_path,
+            lock_path,
+            profile_relative,
+            lock_relative,
+        ) = self.terminal_runtime_inputs(checkout, product)
+
+        venv = self.state_root / "venvs" / f"terminal-{name}"
         if not (venv / "bin" / "python").exists():
             self.run_user(["/usr/bin/python3", "-m", "venv", str(venv)], timeout=300)
         install = self.run_user(
@@ -522,147 +624,166 @@ class Publisher:
         )
         if result.returncode != 0:
             raise QualificationError(
-                "terminal Debian test lane failed:\n" + bounded_output(result.stdout)
+                f"terminal {product['qualification_label']} test lane failed:\n"
+                + bounded_output(result.stdout)
             )
         counts = parse_pytest_counts(result.stdout)
         python_version = self.run_user(
             [str(venv / "bin" / "python"), "-c", "import platform; print(platform.python_version())"],
             cwd=checkout,
         ).stdout.strip()
-        external_status = self.verify_terminal_external_payloads(profile, profile_path)
+        expected_python = product["runtime"]["expected_platform"].get("python_version")
+        if isinstance(expected_python, str) and not python_version.startswith(
+            expected_python + "."
+        ):
+            raise QualificationError(
+                f"publisher Python {python_version} does not match {expected_python}"
+            )
+        external_status = self.verify_terminal_external_payloads(
+            profile, profile_path, str(product["public_path"])
+        )
         playwright = profile.get("playwright")
         return {
             "python": python_version,
             "pytest": counts,
             "profile": profile,
             "profile_path": profile_path,
+            "profile_relative_path": profile_relative,
             "lock_path": lock_path,
+            "lock_relative_path": lock_relative,
             "python_hash_lock_dry_run": "passed",
             "external_payload_hashes_verified": external_status,
             "playwright": playwright if isinstance(playwright, dict) else {},
         }
 
-    def qualify_terminal_macos(
+    def qualify_terminal_candidate(
         self,
         name: str,
         checkout: Path,
         product: dict[str, Any],
         commit: str,
     ) -> dict[str, Any]:
-        candidate = self.macos_candidate_gate(name, product, commit)
+        candidate = self.candidate_gate(name, product, commit)
         source_tree = self.run_user(
             ["/usr/bin/git", "-C", str(checkout), "rev-parse", f"{commit}^{{tree}}"],
             cwd=checkout,
             timeout=60,
         ).stdout.strip()
         if candidate.get("source_git_tree") != source_tree:
-            raise QualificationError("native-Mac candidate source tree is inconsistent")
-        profile_path = checkout / "runtime" / "macos-26-arm64.json"
-        lock_path = checkout / "runtime" / "python-macos26-arm64-py314.lock"
-        requirements_path = checkout / "runtime" / "component-requirements.json"
-        aider_lock_path = checkout / "runtime" / "aider-macos-arm64-py312.lock"
-        for path, label in (
-            (profile_path, "Mac runtime profile"),
-            (lock_path, "Mac Python lock"),
-            (requirements_path, "component requirements"),
-            (aider_lock_path, "Aider artifact lock"),
-        ):
-            if not path.is_file() or path.is_symlink():
-                raise QualificationError(f"{label} is missing or unsafe")
-
-        profile = load_json(profile_path)
-        platform = profile.get("platform")
-        expected_platform = {
-            "os_release_id": "macos",
-            "os_release_version_id": "26",
-            "architecture": "arm64",
-            "uname_machine": "arm64",
-            "python_implementation": "CPython",
-            "python_version": "3.14",
-        }
-        if not isinstance(platform, dict):
-            raise QualificationError("Mac runtime profile platform is invalid")
-        for key, value in expected_platform.items():
-            if platform.get(key) != value:
-                raise QualificationError(
-                    f"Mac runtime profile mismatch for {key}: {platform.get(key)!r}"
-                )
-        if (
-            profile.get("profile") != "macos-26-arm64-python3.14"
-            or profile.get("python", {}).get("lock_file")
-            != "runtime/python-macos26-arm64-py314.lock"
-            or profile.get("python", {}).get("lock_sha256") != sha256_file(lock_path)
-        ):
-            raise QualificationError("Mac runtime profile does not bind its Python lock")
-
-        requirements = load_json(requirements_path)
-        components = (
-            requirements.get("capabilities", {})
-            .get("build", {})
-            .get("components", [])
-        )
-        aider = [
-            item for item in components
-            if isinstance(item, dict) and item.get("id") == "aider"
-        ]
-        if len(aider) != 1:
-            raise QualificationError("Mac component requirements do not declare one Aider")
-        artifact_lock = aider[0].get("artifact_lock")
-        actual_package_count = len(
-            re.findall(
-                rb"(?m)^[A-Za-z0-9_.-]+==[^\r\n ]+",
-                aider_lock_path.read_bytes(),
-            )
-        )
-        expected_aider = {
-            "path": "runtime/aider-macos-arm64-py312.lock",
-            "sha256": sha256_file(aider_lock_path),
-            "format": "uv-requirements",
-            "hash_mode": "required",
-            "binary_only": True,
-            "platform": "macos-arm64",
-            "package_count": actual_package_count,
-        }
-        if (
-            aider[0].get("version") != "0.86.2"
-            or aider[0].get("python_version") != "3.12"
-            or not isinstance(artifact_lock, dict)
-            or any(artifact_lock.get(key) != value for key, value in expected_aider.items())
-        ):
-            raise QualificationError("Mac Aider artifact-lock declaration is inconsistent")
-        dependencies = candidate.get("dependency_locks")
-        if not isinstance(dependencies, dict) or any(
-            dependencies.get(key) != value
-            for key, value in {
-                "aider_python": "3.12",
-                "aider_package_count": actual_package_count,
-                "aider_lock_sha256": sha256_file(aider_lock_path),
-            }.items()
-        ):
-            raise QualificationError("native-Mac candidate does not bind the Aider lock")
+            raise QualificationError("trusted candidate source tree is inconsistent")
+        (
+            profile,
+            profile_path,
+            lock_path,
+            profile_relative,
+            lock_relative,
+        ) = self.terminal_runtime_inputs(checkout, product)
         if candidate.get("runtime_profile") != profile["profile"]:
-            raise QualificationError("native-Mac candidate runtime profile is inconsistent")
+            raise QualificationError("trusted candidate runtime profile is inconsistent")
+        test_key = str(product.get("candidate_test_key", "pytest"))
+        tests = candidate["qualification"].get(test_key)
+        if not isinstance(tests, dict) or tests.get("failed") != 0:
+            raise QualificationError("trusted candidate test evidence is invalid")
 
-        external_status = self.verify_terminal_external_payloads(
-            profile, profile_path, "terminal/macos"
-        )
-        return {
-            "python": "3.14",
-            "pytest": candidate["qualification"].get("pytest", {}),
+        result: dict[str, Any] = {
+            "python": product["runtime"]["expected_platform"].get("python_version"),
+            "pytest": tests,
             "profile": profile,
             "profile_path": profile_path,
-            "profile_relative_path": "runtime/macos-26-arm64.json",
+            "profile_relative_path": profile_relative,
             "lock_path": lock_path,
-            "lock_relative_path": "runtime/python-macos26-arm64-py314.lock",
-            "aider_lock_path": aider_lock_path,
-            "aider_lock_relative_path": "runtime/aider-macos-arm64-py312.lock",
-            "aider_lock": expected_aider,
-            "python_hash_lock_dry_run": "passed_on_native_candidate",
-            "aider_hash_lock_dry_run": "passed_on_native_candidate",
-            "external_payload_hashes_verified": external_status,
+            "lock_relative_path": lock_relative,
+            "python_hash_lock_dry_run": "passed_on_trusted_candidate",
             "playwright": profile.get("playwright", {}),
             "candidate": candidate,
         }
+        aider_config = product["runtime"].get("aider")
+        if isinstance(aider_config, dict):
+            requirements_path = checkout / relative_path(
+                aider_config.get("requirements_path"), "Aider requirements_path"
+            )
+            aider_lock_relative = relative_path(
+                aider_config.get("lock_path"), "Aider lock_path"
+            ).as_posix()
+            aider_lock_path = checkout / aider_lock_relative
+            for path, label in (
+                (requirements_path, "component requirements"),
+                (aider_lock_path, "Aider artifact lock"),
+            ):
+                if not path.is_file() or path.is_symlink():
+                    raise QualificationError(f"{label} is missing or unsafe")
+            requirements = load_json(requirements_path)
+            components = (
+                requirements.get("capabilities", {})
+                .get("build", {})
+                .get("components", [])
+            )
+            aider = [
+                item
+                for item in components
+                if isinstance(item, dict)
+                and item.get("id") == aider_config.get("component_id", "aider")
+            ]
+            if len(aider) != 1:
+                raise QualificationError(
+                    "component requirements do not declare exactly one Aider component"
+                )
+            artifact_lock = aider[0].get("artifact_lock")
+            actual_package_count = len(
+                re.findall(
+                    rb"(?m)^[A-Za-z0-9_.-]+==[^\r\n ]+",
+                    aider_lock_path.read_bytes(),
+                )
+            )
+            expected_aider = {
+                "path": aider_lock_relative,
+                "sha256": sha256_file(aider_lock_path),
+                "format": aider_config.get("format", "uv-requirements"),
+                "hash_mode": aider_config.get("hash_mode", "required"),
+                "binary_only": aider_config.get("binary_only", True),
+                "platform": aider_config.get("platform"),
+                "package_count": actual_package_count,
+            }
+            if (
+                aider[0].get("version") != aider_config.get("version")
+                or aider[0].get("python_version")
+                != aider_config.get("python_version")
+                or not isinstance(artifact_lock, dict)
+                or any(
+                    artifact_lock.get(key) != value
+                    for key, value in expected_aider.items()
+                )
+            ):
+                raise QualificationError(
+                    "Aider artifact-lock declaration is inconsistent"
+                )
+            dependencies = candidate.get("dependency_locks")
+            if not isinstance(dependencies, dict) or any(
+                dependencies.get(key) != value
+                for key, value in {
+                    "aider_python": aider_config.get("python_version"),
+                    "aider_package_count": actual_package_count,
+                    "aider_lock_sha256": sha256_file(aider_lock_path),
+                }.items()
+            ):
+                raise QualificationError(
+                    "trusted candidate does not bind the Aider lock"
+                )
+            result.update(
+                {
+                    "aider_lock_path": aider_lock_path,
+                    "aider_lock_relative_path": aider_lock_relative,
+                    "aider_lock": expected_aider,
+                    "aider_hash_lock_dry_run": "passed_on_trusted_candidate",
+                }
+            )
+
+        result["external_payload_hashes_verified"] = (
+            self.verify_terminal_external_payloads(
+                profile, profile_path, str(product["public_path"])
+            )
+        )
+        return result
 
     def verify_terminal_external_payloads(
         self,
@@ -685,9 +806,17 @@ class Publisher:
                         receipt_path = self.local_download_path(receipt_url)
                         if receipt_path.is_file():
                             receipt = load_json(receipt_path)
-                            runtime = receipt.get(
-                                "macos_runtime", receipt.get("debian_runtime", {})
-                            )
+                            runtime = receipt.get("runtime")
+                            if not isinstance(runtime, dict):
+                                runtime = next(
+                                    (
+                                        value
+                                        for key, value in receipt.items()
+                                        if key.endswith("_runtime")
+                                        and isinstance(value, dict)
+                                    ),
+                                    {},
+                                )
                             if isinstance(runtime, dict) and runtime.get(
                                 "external_payload_hashes_verified"
                             ) is True:
@@ -753,16 +882,19 @@ class Publisher:
             os.replace(temporary, cached)
         return "passed"
 
-    def qualify_node(self, checkout: Path, product: dict[str, Any]) -> dict[str, Any]:
+    def qualify_node_native(
+        self, checkout: Path, product: dict[str, Any]
+    ) -> dict[str, Any]:
+        self.validate_native_host(product)
         self.provenance_gate(checkout)
         temporary = self.test_tmp(checkout)
         node = str(self.config["node_binary"])
-        test_files = product.get("debian_test_files")
+        test_files = product.get("test_files")
         if not isinstance(test_files, list) or not test_files:
-            raise PublisherError("node-adapters debian_test_files is missing")
+            raise PublisherError("node-adapters test_files is missing")
         for relative in test_files:
             if not isinstance(relative, str) or not (checkout / relative).is_file():
-                raise QualificationError(f"configured Debian test file is missing: {relative}")
+                raise QualificationError(f"configured test file is missing: {relative}")
         js_result = self.run_user(
             [node, "--test", "--test-concurrency=1", *test_files],
             cwd=checkout,
@@ -775,7 +907,7 @@ class Publisher:
         )
         if js_result.returncode != 0:
             raise QualificationError(
-                "Agent Node Debian/shared JavaScript test lane failed:\n"
+                f"Agent Node {product['qualification_label']} JavaScript test lane failed:\n"
                 + bounded_output(js_result.stdout)
             )
         js_counts = parse_node_counts(js_result.stdout)
@@ -801,7 +933,11 @@ class Publisher:
             )
         python_count = parse_unittest_count(py_result.stdout)
         binding = self.verify_terminal_binding(
-            checkout / "components" / "tof-terminal" / "debian-13-amd64.json"
+            checkout
+            / relative_path(
+                product.get("terminal_binding_path"),
+                "node terminal_binding_path",
+            )
         )
         node_version = self.run_user([node, "--version"]).stdout.strip().removeprefix("v")
         return {
@@ -816,65 +952,82 @@ class Publisher:
             "terminal_binding": binding,
         }
 
-    def qualify_node_macos(
+    def qualify_node_candidate(
         self,
         name: str,
         checkout: Path,
         product: dict[str, Any],
         commit: str,
     ) -> dict[str, Any]:
-        candidate = self.macos_candidate_gate(name, product, commit)
+        candidate = self.candidate_gate(name, product, commit)
         source_tree = self.run_user(
             ["/usr/bin/git", "-C", str(checkout), "rev-parse", f"{commit}^{{tree}}"],
             cwd=checkout,
             timeout=60,
         ).stdout.strip()
         if candidate.get("source_git_tree") != source_tree:
-            raise QualificationError("native-Mac candidate source tree is inconsistent")
+            raise QualificationError("trusted candidate source tree is inconsistent")
         provenance_path = checkout / "export-provenance.json"
         if not provenance_path.is_file() or provenance_path.is_symlink():
             raise QualificationError("Agent Node source provenance is missing")
         provenance = load_json(provenance_path)
-        dependency = provenance.get("dependency_provenance", {}).get("aider")
-        expected_lock_sha = (
-            candidate.get("dependency_locks", {}).get("aider_lock_sha256")
-        )
+        provenance_config = product.get("provenance")
         if (
-            provenance.get("status") != "source_sync_only"
-            or provenance.get("published") is not False
-            or provenance.get("release", {}).get("status") != "unpublished"
-            or not isinstance(dependency, dict)
-            or dependency.get("artifact_lock_sha256") != expected_lock_sha
-            or dependency.get("artifact_package_count") != 108
-            or dependency.get("install_contract")
-            != "uv-pip-require-hashes-strict-binary-only"
-            or candidate.get("source_composite_tree_sha256")
+            candidate.get("source_composite_tree_sha256")
             != provenance.get("standalone_composite_tree", {}).get("sha256")
         ):
             raise QualificationError(
-                "Agent Node source provenance does not bind the admitted Mac Aider closure"
+                "Agent Node source provenance does not bind the trusted candidate"
             )
-        manifest_path = self.public_root / "terminal" / "macos" / "manifest.json"
+        if isinstance(provenance_config, dict):
+            dependency = provenance.get("dependency_provenance", {}).get("aider")
+            expected_lock_sha = (
+                candidate.get("dependency_locks", {}).get("aider_lock_sha256")
+            )
+            if (
+                provenance.get("status")
+                != provenance_config.get("status", "source_sync_only")
+                or provenance.get("published")
+                is not provenance_config.get("published", False)
+                or provenance.get("release", {}).get("status")
+                != provenance_config.get("release_status", "unpublished")
+                or not isinstance(dependency, dict)
+                or dependency.get("artifact_lock_sha256") != expected_lock_sha
+                or dependency.get("artifact_package_count")
+                != provenance_config.get("aider_package_count")
+                or dependency.get("install_contract")
+                != provenance_config.get("aider_install_contract")
+            ):
+                raise QualificationError(
+                    "Agent Node source provenance does not bind the candidate dependency closure"
+                )
+        terminal_public_path = relative_path(
+            product.get("terminal_public_path"),
+            "node terminal_public_path",
+        )
+        manifest_path = self.public_root / terminal_public_path / "manifest.json"
         if not manifest_path.is_file() or manifest_path.is_symlink():
-            raise QualificationError("Mac TOF-Terminal release must be published first")
+            raise QualificationError(
+                f"{product['qualification_label']} TOF-Terminal release must be published first"
+            )
         manifest = load_json(manifest_path)
         profiles = manifest.get("runtime_profiles")
         matches = [
             item for item in profiles
             if isinstance(item, dict)
-            and item.get("id") == "macos-26-arm64-python3.14"
-            and item.get("qualification_lane") == "macos"
+            and item.get("id") == product.get("terminal_profile_id")
+            and item.get("qualification_lane") == product["qualification_lane"]
         ] if isinstance(profiles, list) else []
         if len(matches) != 1:
-            raise QualificationError("published Mac Terminal manifest is malformed")
+            raise QualificationError("published Terminal manifest is malformed")
         archive = manifest.get("archive")
         profile = matches[0].get("profile")
         python_lock = matches[0].get("python_lock")
         if not all(isinstance(item, dict) for item in (archive, profile, python_lock)):
-            raise QualificationError("published Mac Terminal identities are malformed")
-        self.verify_bound_file(archive, "Mac archive")
-        self.verify_bound_file(profile, "Mac runtime profile")
-        self.verify_bound_file(python_lock, "Mac Python lock")
+            raise QualificationError("published Terminal identities are malformed")
+        self.verify_bound_file(archive, "Terminal archive")
+        self.verify_bound_file(profile, "Terminal runtime profile")
+        self.verify_bound_file(python_lock, "Terminal Python lock")
         terminal_commit = manifest.get("commit")
         if (
             not isinstance(terminal_commit, str)
@@ -882,17 +1035,19 @@ class Publisher:
             or candidate.get("terminal_source_commit") != terminal_commit
         ):
             raise QualificationError(
-                "native-Mac Agent Node candidate does not bind the published Terminal"
+                "trusted Agent Node candidate does not bind the published Terminal"
             )
-        tests = candidate.get("qualification", {}).get("tests")
+        tests = candidate.get("qualification", {}).get(
+            product.get("candidate_test_key", "tests")
+        )
         if not isinstance(tests, dict) or tests.get("failed") != 0:
-            raise QualificationError("native-Mac Agent Node test evidence is invalid")
+            raise QualificationError("trusted Agent Node test evidence is invalid")
         return {
             "node": candidate.get("node_version", "22.22.2"),
             "tests": tests,
             "candidate": candidate,
             "terminal_binding": {
-                "qualification_lane": "macos",
+                "qualification_lane": product["qualification_lane"],
                 "commit": terminal_commit,
                 "archive_sha256": archive["sha256"],
                 "runtime_profile_sha256": profile["sha256"],
@@ -1022,6 +1177,15 @@ class Publisher:
             "root_directory": root,
         }
 
+    def installer_template_path(self, product: dict[str, Any]) -> Path:
+        configured = product.get(
+            "installer_template_public_path",
+            f"{product['public_path']}/install.sh",
+        )
+        return self.public_root / relative_path(
+            configured, "installer_template_public_path"
+        )
+
     def installer_for(
         self,
         current: Path,
@@ -1029,7 +1193,7 @@ class Publisher:
         archive_sha: str,
         *,
         base_url: str | None = None,
-        macos: bool = False,
+        portable_checksum: bool = False,
     ) -> bytes:
         try:
             if current.is_symlink() or not current.is_file():
@@ -1056,7 +1220,7 @@ class Publisher:
             )
             if count != 1:
                 raise PublisherError("installer template has no exact BASE_URL field")
-        if macos:
+        if portable_checksum:
             text, count = re.subn(
                 r"(?m)^(for required_command in .*) sha256sum (.*; do)$",
                 r"\1 \2",
@@ -1090,6 +1254,15 @@ class Publisher:
                 )
         return text.encode("utf-8")
 
+    def other_platforms(self, product: dict[str, Any]) -> dict[str, str]:
+        current_lane = product["qualification_lane"]
+        return {
+            str(item["qualification_lane"]): "separate_channel"
+            for item in self.products.values()
+            if item["product"] == product["product"]
+            and item["qualification_lane"] != current_lane
+        }
+
     def terminal_documents(
         self,
         product: dict[str, Any],
@@ -1102,19 +1275,15 @@ class Publisher:
     ) -> tuple[dict[str, Any], dict[str, Any], bytes]:
         public_path = str(product["public_path"])
         lane = str(product["qualification_lane"])
-        profile_relative = validation.get(
-            "profile_relative_path", "runtime/debian-13-amd64.json"
-        )
-        lock_relative = validation.get(
-            "lock_relative_path", "runtime/python-debian13-amd64-py313.lock"
-        )
+        profile_relative = validation["profile_relative_path"]
+        lock_relative = validation["lock_relative_path"]
         release_url = (
             f"https://downloads.techoverfl.com/{public_path}/releases/{commit}"
         )
-        runtime = staging / "runtime"
-        runtime.mkdir(mode=0o755)
         profile_target = staging / profile_relative
         lock_target = staging / lock_relative
+        profile_target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        lock_target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
         shutil.copyfile(validation["profile_path"], profile_target)
         shutil.copyfile(validation["lock_path"], lock_target)
         os.chmod(profile_target, 0o644)
@@ -1143,8 +1312,13 @@ class Publisher:
             ],
             "python_hash_lock_dry_run": validation["python_hash_lock_dry_run"],
         }
-        if lane == "macos":
+        if "candidate" in validation:
+            runtime_receipt["trusted_candidate_sha256"] = validation["candidate"][
+                "_candidate_sha256"
+            ]
+        if "aider_lock_relative_path" in validation:
             aider_target = staging / validation["aider_lock_relative_path"]
+            aider_target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
             shutil.copyfile(validation["aider_lock_path"], aider_target)
             os.chmod(aider_target, 0o644)
             runtime_receipt.update(
@@ -1153,9 +1327,6 @@ class Publisher:
                     "aider_lock_sha256": sha256_file(aider_target),
                     "aider_package_count": validation["aider_lock"]["package_count"],
                     "aider_hash_lock_dry_run": validation["aider_hash_lock_dry_run"],
-                    "native_candidate_sha256": validation["candidate"][
-                        "_candidate_sha256"
-                    ],
                 }
             )
         receipt = {
@@ -1175,17 +1346,16 @@ class Publisher:
                 "reproducible_archive_check": "passed",
                 "browser_payload_embedded": False,
             },
-            f"{lane}_runtime": runtime_receipt,
+            "runtime": runtime_receipt,
             "validation": {
                 "python": validation["python"],
                 "pytest": validation["pytest"],
                 "credential_pattern_scan": "passed",
             },
             "qualification": {
-                "lane": "macos-26-arm64" if lane == "macos" else "debian-13-amd64",
-                "native_evidence": (
-                    "trusted_candidate" if lane == "macos" else "publisher_native"
-                ),
+                "lane": lane,
+                "label": product["qualification_label"],
+                "evidence": product["qualification_mode"],
             },
             "signature": {
                 "status": "not_configured",
@@ -1214,7 +1384,7 @@ class Publisher:
             "runtime_profiles": [
                 {
                     "id": validation["profile"].get(
-                        "profile", "debian-13-amd64-python3.13"
+                        "profile", product["runtime"].get("profile_id")
                     ),
                     "qualification_lane": lane,
                     "profile": {
@@ -1230,11 +1400,7 @@ class Publisher:
                     "browser_payload_embedded": False,
                 }
             ],
-            "other_platforms": (
-                {"ubuntu": "unqualified", "debian": "separate_channel"}
-                if lane == "macos"
-                else {"ubuntu": "unqualified", "macos": "unqualified"}
-            ),
+            "other_platforms": self.other_platforms(product),
             "signature": {"status": "not_configured"},
             "installer": {
                 "url": f"https://downloads.techoverfl.com/{public_path}/install.sh",
@@ -1261,10 +1427,8 @@ Commit-addressed archive:
 SHA-256:
   {archive['sha256']}
 
-This pointer is qualified only for {
-    "macOS 26 arm64 with CPython 3.14" if lane == "macos"
-    else "Debian 13 amd64 with CPython 3.13"
-}. Other operating systems remain independent release lanes. Browser payloads
+This pointer is qualified only for {product["qualification_label"]}.
+Other operating systems remain independent release lanes. Browser payloads
 are not embedded in the application archive. The installer verifies the
 immutable archive before installation; use --verify-only for admission without
 installing.
@@ -1320,13 +1484,12 @@ installing.
             },
             "terminal_binding": receipt_binding,
             "qualification": {
-                "lane": "macos-26-arm64" if lane == "macos" else "debian-13-amd64",
-                "native_evidence": (
-                    "trusted_candidate" if lane == "macos" else "publisher_native"
-                ),
-                "native_candidate_sha256": (
+                "lane": lane,
+                "label": product["qualification_label"],
+                "evidence": product["qualification_mode"],
+                "trusted_candidate_sha256": (
                     validation["candidate"]["_candidate_sha256"]
-                    if lane == "macos" else None
+                    if "candidate" in validation else None
                 ),
             },
             "signature": {
@@ -1354,11 +1517,7 @@ installing.
             "checksums": {"url": f"{release_url}/SHA256SUMS"},
             "release_receipt": {"url": f"{release_url}/release-receipt.json"},
             "component_bindings": {"tof-terminal": binding},
-            "other_platforms": (
-                {"ubuntu": "unqualified", "debian": "separate_channel"}
-                if lane == "macos"
-                else {"ubuntu": "unqualified", "macos": "unqualified"}
-            ),
+            "other_platforms": self.other_platforms(product),
             "signature": {"status": "not_configured"},
             "installer": {
                 "url": f"https://downloads.techoverfl.com/{public_path}/install.sh",
@@ -1385,10 +1544,8 @@ Commit-addressed archive:
 SHA-256:
   {archive['sha256']}
 
-This release is admitted on the {
-    "trusted native macOS 26 arm64 candidate lane"
-    if lane == "macos" else "Debian 13 amd64/shared test lane"
-} and binds immutable TOF Terminal release {binding['commit']}. Other operating
+This release is admitted for {product["qualification_label"]} and binds
+immutable TOF Terminal release {binding['commit']}. Other operating
 systems remain separate release lanes. Use --verify-only to validate the
 archive without installing.
 """
@@ -1440,7 +1597,11 @@ archive without installing.
         write_json(product_root / "manifest.json", manifest, 0o644)
 
     def sync_one(
-        self, name: str, *, retry_failed: bool = False
+        self,
+        name: str,
+        *,
+        retry_failed: bool = False,
+        dry_run: bool = False,
     ) -> dict[str, Any]:
         if name not in self.products:
             raise PublisherError(f"unknown product: {name}")
@@ -1470,23 +1631,23 @@ archive without installing.
             tracked = self.tracked_files(checkout)
             self.credential_scan(checkout, tracked)
             product_type = str(product["product"])
-            lane = str(product["qualification_lane"])
-            if product_type == "terminal" and lane == "debian":
+            mode = str(product["qualification_mode"])
+            if product_type == "terminal" and mode == "publisher_native":
                 self.provenance_gate(checkout)
-                validation = self.qualify_terminal(checkout)
-            elif product_type == "terminal" and lane == "macos":
-                validation = self.qualify_terminal_macos(
+                validation = self.qualify_terminal_native(name, checkout, product)
+            elif product_type == "terminal" and mode == "trusted_candidate":
+                validation = self.qualify_terminal_candidate(
                     name, checkout, product, remote
                 )
-            elif product_type == "node-adapters" and lane == "debian":
-                validation = self.qualify_node(checkout, product)
-            elif product_type == "node-adapters" and lane == "macos":
-                validation = self.qualify_node_macos(
+            elif product_type == "node-adapters" and mode == "publisher_native":
+                validation = self.qualify_node_native(checkout, product)
+            elif product_type == "node-adapters" and mode == "trusted_candidate":
+                validation = self.qualify_node_candidate(
                     name, checkout, product, remote
                 )
             else:
                 raise PublisherError(
-                    f"no qualification implementation for {product_type}/{lane}"
+                    f"no qualification implementation for {product_type}/{mode}"
                 )
 
             staging = Path(
@@ -1521,13 +1682,8 @@ archive without installing.
             sums = [f"{archive['sha256']}  {archive['filename']}"]
             if product_type == "terminal":
                 for relative in (
-                    validation.get(
-                        "profile_relative_path", "runtime/debian-13-amd64.json"
-                    ),
-                    validation.get(
-                        "lock_relative_path",
-                        "runtime/python-debian13-amd64-py313.lock",
-                    ),
+                    validation["profile_relative_path"],
+                    validation["lock_relative_path"],
                     validation.get("aider_lock_relative_path"),
                 ):
                     if isinstance(relative, str):
@@ -1538,17 +1694,21 @@ archive without installing.
                 staging / "SHA256SUMS",
                 ("\n".join(sums) + "\n").encode("utf-8"),
             )
-            product_root = self.public_root / str(product["public_path"])
-            template_public_path = str(
-                product.get("installer_template_public_path", product["public_path"])
-            )
             installer = self.installer_for(
-                self.public_root / template_public_path / "install.sh",
+                self.installer_template_path(product),
                 remote,
                 archive["sha256"],
                 base_url=f"https://downloads.techoverfl.com/{product['public_path']}",
-                macos=lane == "macos",
+                portable_checksum=bool(product.get("portable_checksum")),
             )
+            if dry_run:
+                return {
+                    "product": name,
+                    "status": "qualified_dry_run",
+                    "published_commit": published,
+                    "commit": remote,
+                    "archive_sha256": archive["sha256"],
+                }
             self.promote(product, remote, staging, manifest, installer, readme)
             self.clear_failure(name)
             return {
@@ -1559,10 +1719,15 @@ archive without installing.
                 "archive_sha256": archive["sha256"],
             }
         except QualificationError as exc:
-            self.record_failure(name, remote, str(exc))
+            if not dry_run:
+                self.record_failure(name, remote, str(exc))
             return {
                 "product": name,
-                "status": "qualification_blocked",
+                "status": (
+                    "qualification_blocked_dry_run"
+                    if dry_run
+                    else "qualification_blocked"
+                ),
                 "commit": remote,
                 "published_commit": published,
                 "reason": bounded_output(str(exc), 4000),
@@ -1574,7 +1739,11 @@ archive without installing.
                 shutil.rmtree(staging, ignore_errors=True)
 
     def sync(
-        self, selected: list[str], *, retry_failed: bool = False
+        self,
+        selected: list[str],
+        *,
+        retry_failed: bool = False,
+        dry_run: bool = False,
     ) -> list[dict[str, Any]]:
         self.validate_environment(require_root=True)
         lock_path = self.state_root / "locks" / "publisher.lock"
@@ -1584,7 +1753,11 @@ archive without installing.
             except BlockingIOError as exc:
                 raise PublisherError("another publisher run is already active") from exc
             return [
-                self.sync_one(name, retry_failed=retry_failed)
+                self.sync_one(
+                    name,
+                    retry_failed=retry_failed,
+                    dry_run=dry_run,
+                )
                 for name in selected
             ]
 
@@ -1657,6 +1830,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="retry a commit already recorded as qualification-blocked",
     )
+    sync_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="qualify and build without promoting public files",
+    )
     status_parser = subparsers.add_parser("status", help="show publication state")
     status_parser.add_argument(
         "--product", action="append"
@@ -1669,7 +1847,11 @@ def main(argv: list[str] | None = None) -> int:
         publisher = Publisher(Path(arguments.config))
         selected = choose_products(publisher, arguments.product)
         if arguments.command == "sync":
-            result = publisher.sync(selected, retry_failed=arguments.retry_failed)
+            result = publisher.sync(
+                selected,
+                retry_failed=arguments.retry_failed,
+                dry_run=arguments.dry_run,
+            )
         else:
             result = publisher.status(selected, include_remote=arguments.remote)
         print(json.dumps(result, indent=2))

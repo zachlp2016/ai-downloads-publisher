@@ -41,29 +41,75 @@ class PublisherTest(unittest.TestCase):
                 "terminal": {
                     "product": "terminal",
                     "qualification_lane": "debian",
+                    "qualification_mode": "publisher_native",
+                    "qualification_label": "Debian 13 amd64",
                     "repository_ssh": "git@example/terminal",
                     "repository_https": "https://example/terminal",
                     "ref": "refs/heads/main",
                     "public_path": "terminal",
                     "archive_prefix": "tof-terminal",
+                    "runtime": {
+                        "profile_id": "debian-13-amd64-python3.13",
+                        "profile_path": "runtime/debian-13-amd64.json",
+                        "python_lock_path": "runtime/python.lock",
+                        "expected_platform": {
+                            "os_release_id": "debian",
+                            "os_release_version_id": "13",
+                        },
+                    },
                 },
                 "terminal-macos": {
                     "product": "terminal",
                     "qualification_lane": "macos",
+                    "qualification_mode": "trusted_candidate",
+                    "qualification_label": "macOS 26 arm64",
                     "repository_ssh": "git@example/terminal",
                     "repository_https": "https://example/terminal",
                     "ref": "refs/heads/main",
                     "public_path": "terminal/macos",
                     "archive_prefix": "tof-terminal",
+                    "runtime": {
+                        "profile_id": "macos-26-arm64-python3.14",
+                        "profile_path": "runtime/macos-26-arm64.json",
+                        "python_lock_path": "runtime/python-macos.lock",
+                        "expected_platform": {
+                            "os_release_id": "macos",
+                            "os_release_version_id": "26",
+                        },
+                    },
                 },
                 "node-adapters-macos": {
                     "product": "node-adapters",
                     "qualification_lane": "macos",
+                    "qualification_mode": "trusted_candidate",
+                    "qualification_label": "macOS 26 arm64",
                     "repository_ssh": "git@example/node",
                     "repository_https": "https://example/node",
                     "ref": "refs/heads/main",
                     "public_path": "node-adapters/macos",
                     "archive_prefix": "tof-agent-node",
+                    "terminal_public_path": "terminal/macos",
+                    "terminal_profile_id": "macos-26-arm64-python3.14",
+                },
+                "terminal-ubuntu": {
+                    "product": "terminal",
+                    "qualification_lane": "ubuntu",
+                    "qualification_mode": "trusted_candidate",
+                    "qualification_label": "Ubuntu 24.04 LTS amd64",
+                    "repository_ssh": "git@example/terminal",
+                    "repository_https": "https://example/terminal",
+                    "ref": "refs/heads/main",
+                    "public_path": "terminal/ubuntu",
+                    "archive_prefix": "tof-terminal",
+                    "runtime": {
+                        "profile_id": "ubuntu-24.04-amd64-python3.12",
+                        "profile_path": "runtime/ubuntu-24.04-amd64.json",
+                        "python_lock_path": "runtime/python-ubuntu.lock",
+                        "expected_platform": {
+                            "os_release_id": "ubuntu",
+                            "os_release_version_id": "24.04",
+                        },
+                    },
                 },
             },
         }
@@ -74,13 +120,14 @@ class PublisherTest(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def test_configuration_requires_lane_specific_public_paths(self):
+    def test_configuration_accepts_new_lanes_and_rejects_path_collisions(self):
+        self.assertIn("terminal-ubuntu", self.publisher.products)
         broken = json.loads(json.dumps(self.config))
-        broken["products"]["terminal-macos"]["public_path"] = "terminal"
+        broken["products"]["terminal-ubuntu"]["public_path"] = "terminal"
         path = self.root / "broken.json"
         path.write_text(json.dumps(broken), encoding="utf-8")
         with self.assertRaisesRegex(
-            publisher_module.PublisherError, "public_path must be 'terminal/macos'"
+            publisher_module.PublisherError, "duplicates public path"
         ):
             publisher_module.Publisher(path)
 
@@ -103,7 +150,7 @@ class PublisherTest(unittest.TestCase):
             encoding="utf-8",
         )
         os.chmod(candidate, 0o600)
-        admitted = self.publisher.macos_candidate_gate(
+        admitted = self.publisher.candidate_gate(
             "terminal-macos",
             self.publisher.products["terminal-macos"],
             commit,
@@ -115,7 +162,7 @@ class PublisherTest(unittest.TestCase):
         with self.assertRaisesRegex(
             publisher_module.QualificationError, "mismatch for source_commit"
         ):
-            self.publisher.macos_candidate_gate(
+            self.publisher.candidate_gate(
                 "terminal-macos",
                 self.publisher.products["terminal-macos"],
                 commit,
@@ -141,7 +188,7 @@ printf '%s  %s\\n' "${ARCHIVE_SHA256}" "${archive_path}" | sha256sum --check --s
             "b" * 40,
             "c" * 64,
             base_url="https://downloads.techoverfl.com/terminal/macos",
-            macos=True,
+            portable_checksum=True,
         ).decode()
         self.assertIn(
             'readonly BASE_URL="https://downloads.techoverfl.com/terminal/macos"',
@@ -150,6 +197,14 @@ printf '%s  %s\\n' "${ARCHIVE_SHA256}" "${archive_path}" | sha256sum --check --s
         self.assertIn("command -v shasum", rendered)
         self.assertIn("printf '%s  %s\\n'", rendered)
         self.assertNotIn("curl sha256sum tar", rendered)
+
+    def test_shared_installer_template_is_a_file_path(self):
+        product = self.publisher.products["terminal-macos"]
+        product["installer_template_public_path"] = "terminal/install.sh"
+        self.assertEqual(
+            self.publisher.installer_template_path(product),
+            self.public / "terminal" / "install.sh",
+        )
 
     def test_mac_promotion_cannot_change_debian_pointer(self):
         commit = "d" * 40
@@ -238,9 +293,10 @@ printf '%s  %s\\n' "${ARCHIVE_SHA256}" "${archive_path}" | sha256sum --check --s
         prefix = "https://downloads.techoverfl.com/terminal/macos/releases/"
         self.assertTrue(manifest["archive"]["url"].startswith(prefix))
         self.assertEqual(
-            manifest["runtime_profiles"][0]["qualification_lane"], "macos"
+            manifest["runtime_profiles"][0]["qualification_lane"],
+            "macos",
         )
-        self.assertIn("macos_runtime", receipt)
+        self.assertIn("runtime", receipt)
         self.assertTrue(
             (staging / "runtime" / "aider-macos-arm64-py312.lock").is_file()
         )
@@ -284,7 +340,7 @@ printf '%s  %s\\n' "${ARCHIVE_SHA256}" "${archive_path}" | sha256sum --check --s
             manifest["component_bindings"]["tof-terminal"]["qualification_lane"],
             "macos",
         )
-        self.assertEqual(receipt["qualification"]["lane"], "macos-26-arm64")
+        self.assertEqual(receipt["qualification"]["lane"], "macos")
 
 
 if __name__ == "__main__":
