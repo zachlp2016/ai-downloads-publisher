@@ -1,0 +1,1683 @@
+#!/usr/bin/env python3
+"""Fail-closed GitHub-to-downloads.techoverfl.com release publisher."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import gzip
+import hashlib
+import json
+import os
+import pwd
+import re
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib.parse import unquote, urlparse
+
+
+DEFAULT_CONFIG = "/etc/techoverfl-publisher/config.json"
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+HEX256_RE = re.compile(r"^[0-9a-f]{64}$")
+SECRET_PATTERNS = (
+    re.compile(rb"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"),
+    re.compile(rb"AKIA[0-9A-Z]{16}"),
+    re.compile(rb"gh[pousr]_[A-Za-z0-9]{36,255}"),
+    re.compile(rb"sk-[A-Za-z0-9]{32,}"),
+)
+
+
+class PublisherError(RuntimeError):
+    """Infrastructure or configuration error that should be retried."""
+
+
+class QualificationError(RuntimeError):
+    """Commit-specific admission failure that should be cached."""
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            document = json.load(stream)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PublisherError(f"cannot read valid JSON from {path}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise PublisherError(f"JSON document must be an object: {path}")
+    return document
+
+
+def atomic_write(path: Path, content: bytes, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            mode,
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def write_json(path: Path, document: dict[str, Any], mode: int = 0o644) -> None:
+    payload = json.dumps(document, indent=2, sort_keys=False).encode("utf-8") + b"\n"
+    atomic_write(path, payload, mode)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        with os.fdopen(descriptor, "rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+    finally:
+        # fdopen owns the descriptor after successful construction.
+        pass
+    return digest.hexdigest()
+
+
+def bounded_output(output: str, maximum: int = 6000) -> str:
+    clean = output.replace("\x00", "?")
+    return clean if len(clean) <= maximum else clean[-maximum:]
+
+
+class Publisher:
+    def __init__(self, config_path: Path) -> None:
+        self.config_path = config_path
+        self.config = load_json(config_path)
+        self.state_root = Path(self.require("state_root")).resolve()
+        self.public_root = Path(self.require("public_root")).resolve()
+        self.run_as_user = str(self.require("run_as_user"))
+        self.ssh_key = Path(self.require("ssh_key")).resolve()
+        self.known_hosts = Path(self.require("known_hosts")).resolve()
+        self.ssh_hostname_override = self.config.get("ssh_hostname_override")
+        self.ssh_port = self.config.get("ssh_port")
+        if self.ssh_hostname_override is not None and not isinstance(
+            self.ssh_hostname_override, str
+        ):
+            raise PublisherError("ssh_hostname_override must be a string")
+        if self.ssh_port is not None and (
+            not isinstance(self.ssh_port, int)
+            or isinstance(self.ssh_port, bool)
+            or not 1 <= self.ssh_port <= 65535
+        ):
+            raise PublisherError("ssh_port must be an integer from 1 through 65535")
+        products = self.require("products")
+        if not isinstance(products, dict) or not products:
+            raise PublisherError("products must be a non-empty object")
+        self.products: dict[str, dict[str, Any]] = products
+        for name, product in self.products.items():
+            if not isinstance(product, dict):
+                raise PublisherError(f"product {name} must be an object")
+            if product.get("product") not in {"terminal", "node-adapters"}:
+                raise PublisherError(f"product {name} has an invalid product type")
+            if product.get("qualification_lane") not in {"debian", "macos"}:
+                raise PublisherError(f"product {name} has an invalid qualification lane")
+            expected_suffix = "/macos" if product["qualification_lane"] == "macos" else ""
+            expected_path = str(product["product"]) + expected_suffix
+            if product.get("public_path") != expected_path:
+                raise PublisherError(
+                    f"product {name} public_path must be {expected_path!r}"
+                )
+        try:
+            self.user_record = pwd.getpwnam(self.run_as_user)
+        except KeyError as exc:
+            raise PublisherError(f"unknown run_as_user: {self.run_as_user}") from exc
+
+    def require(self, key: str) -> Any:
+        if key not in self.config:
+            raise PublisherError(f"configuration is missing {key}")
+        return self.config[key]
+
+    def validate_environment(self, require_root: bool) -> None:
+        if require_root and os.geteuid() != 0:
+            raise PublisherError("sync must run as root so publication can be promoted atomically")
+        for path, label in ((self.ssh_key, "SSH key"), (self.known_hosts, "known_hosts")):
+            if not path.is_file() or path.is_symlink():
+                raise PublisherError(f"{label} is missing or unsafe: {path}")
+        if stat.S_IMODE(self.ssh_key.stat().st_mode) & 0o077:
+            raise PublisherError(f"SSH key permissions are too broad: {self.ssh_key}")
+        if not self.public_root.is_dir():
+            raise PublisherError(f"public root does not exist: {self.public_root}")
+        if require_root:
+            self.state_root.mkdir(parents=True, exist_ok=True)
+            for name in (
+                "cache", "candidates", "failed", "locks", "staging", "tmp",
+                "venvs", "work",
+            ):
+                directory = self.state_root / name
+                directory.mkdir(mode=0o700, exist_ok=True)
+                if os.geteuid() == 0 and name in {
+                    "cache",
+                    "staging",
+                    "tmp",
+                    "venvs",
+                    "work",
+                }:
+                    os.chown(directory, self.user_record.pw_uid, self.user_record.pw_gid)
+
+    def user_env(self, extra: dict[str, str] | None = None) -> dict[str, str]:
+        environment = os.environ.copy()
+        ssh_parts = [
+            "/usr/bin/ssh",
+            "-F",
+            "/dev/null",
+            "-i",
+            str(self.ssh_key),
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={self.known_hosts}",
+            "-o",
+            "ConnectTimeout=15",
+        ]
+        if self.ssh_hostname_override:
+            ssh_parts.extend(("-o", f"Hostname={self.ssh_hostname_override}"))
+        if self.ssh_port:
+            ssh_parts.extend(("-p", str(self.ssh_port)))
+        environment["GIT_SSH_COMMAND"] = shlex.join(ssh_parts)
+        environment["GIT_TERMINAL_PROMPT"] = "0"
+        environment["PIP_CACHE_DIR"] = str(self.state_root / "cache" / "pip")
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        if extra:
+            environment.update(extra)
+        return environment
+
+    def run_user(
+        self,
+        command: list[str],
+        *,
+        cwd: Path | None = None,
+        extra_env: dict[str, str] | None = None,
+        timeout: int = 1800,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        actual = command
+        if os.geteuid() == 0:
+            actual = [
+                "/usr/sbin/runuser",
+                "--user",
+                self.run_as_user,
+                "--",
+                *command,
+            ]
+        result = subprocess.run(
+            actual,
+            cwd=cwd,
+            env=self.user_env(extra_env),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            check=False,
+        )
+        if check and result.returncode != 0:
+            rendered = shlex.join(command)
+            raise PublisherError(
+                f"command failed ({result.returncode}): {rendered}\n{bounded_output(result.stdout)}"
+            )
+        return result
+
+    def remote_sha(self, product: dict[str, Any]) -> str:
+        repository = str(product["repository_ssh"])
+        ref = str(product["ref"])
+        result = self.run_user(
+            ["/usr/bin/git", "ls-remote", "--exit-code", repository, ref],
+            timeout=60,
+        )
+        fields = result.stdout.strip().split()
+        if len(fields) != 2 or fields[1] != ref or not SHA_RE.fullmatch(fields[0]):
+            raise PublisherError(f"GitHub returned an invalid ref result for {repository} {ref}")
+        return fields[0]
+
+    def published_sha(self, product: dict[str, Any]) -> str | None:
+        manifest_path = self.public_root / str(product["public_path"]) / "manifest.json"
+        if not manifest_path.exists():
+            return None
+        commit = load_json(manifest_path).get("commit")
+        if not isinstance(commit, str) or not SHA_RE.fullmatch(commit):
+            raise PublisherError(f"published manifest has an invalid commit: {manifest_path}")
+        return commit
+
+    def failed_path(self, name: str) -> Path:
+        return self.state_root / "failed" / f"{name}.json"
+
+    def failed_sha(self, name: str) -> str | None:
+        path = self.failed_path(name)
+        if not path.exists():
+            return None
+        commit = load_json(path).get("commit")
+        return commit if isinstance(commit, str) and SHA_RE.fullmatch(commit) else None
+
+    def record_failure(self, name: str, commit: str, reason: str) -> None:
+        write_json(
+            self.failed_path(name),
+            {
+                "schema_version": 1,
+                "product": name,
+                "commit": commit,
+                "status": "qualification_blocked",
+                "reason": bounded_output(reason, 4000),
+                "recorded_at": utc_now(),
+            },
+            mode=0o600,
+        )
+
+    def clear_failure(self, name: str) -> None:
+        path = self.failed_path(name)
+        if path.exists():
+            path.unlink()
+
+    def make_checkout(self, name: str, product: dict[str, Any], commit: str) -> Path:
+        work_root = self.state_root / "work"
+        checkout = Path(
+            tempfile.mkdtemp(prefix=f"{name}-{commit[:12]}-", dir=work_root)
+        )
+        if os.geteuid() == 0:
+            os.chown(checkout, self.user_record.pw_uid, self.user_record.pw_gid)
+        commands = (
+            ["/usr/bin/git", "init", "--quiet", str(checkout)],
+            [
+                "/usr/bin/git",
+                "-C",
+                str(checkout),
+                "remote",
+                "add",
+                "origin",
+                str(product["repository_ssh"]),
+            ],
+            [
+                "/usr/bin/git",
+                "-C",
+                str(checkout),
+                "fetch",
+                "--quiet",
+                "--depth=1",
+                "origin",
+                commit,
+            ],
+            [
+                "/usr/bin/git",
+                "-C",
+                str(checkout),
+                "checkout",
+                "--quiet",
+                "--detach",
+                "FETCH_HEAD",
+            ],
+        )
+        for command in commands:
+            self.run_user(command, timeout=300)
+        actual = self.run_user(
+            ["/usr/bin/git", "-C", str(checkout), "rev-parse", "HEAD"]
+        ).stdout.strip()
+        if actual != commit:
+            raise PublisherError(f"fetched commit mismatch: requested {commit}, received {actual}")
+        return checkout
+
+    def tracked_files(self, checkout: Path) -> list[str]:
+        result = self.run_user(
+            ["/usr/bin/git", "-C", str(checkout), "ls-files", "-z"]
+        )
+        paths = [item for item in result.stdout.split("\0") if item]
+        if not paths:
+            raise QualificationError("repository contains no tracked files")
+        for relative in paths:
+            pure = Path(relative)
+            if pure.is_absolute() or ".." in pure.parts:
+                raise QualificationError(f"unsafe tracked path: {relative}")
+        return paths
+
+    def credential_scan(self, checkout: Path, tracked: list[str]) -> None:
+        for relative in tracked:
+            path = checkout / relative
+            try:
+                if path.is_symlink():
+                    payload = os.readlink(path).encode("utf-8", errors="replace")
+                elif path.is_file():
+                    if path.stat().st_size > 16 * 1024 * 1024:
+                        continue
+                    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                    with os.fdopen(descriptor, "rb") as stream:
+                        payload = stream.read(16 * 1024 * 1024 + 1)
+                else:
+                    continue
+            except OSError as exc:
+                raise QualificationError(f"credential scan could not safely read {relative}: {exc}") from exc
+            if b"\0" in payload:
+                continue
+            for pattern in SECRET_PATTERNS:
+                if pattern.search(payload):
+                    raise QualificationError(
+                        f"credential pattern scan rejected tracked file: {relative}"
+                    )
+
+    def provenance_gate(self, checkout: Path) -> None:
+        path = checkout / "export-provenance.json"
+        if not path.exists():
+            return
+        document = load_json(path)
+        release = document.get("release")
+        release_status = release.get("status") if isinstance(release, dict) else None
+        if document.get("published") is False or release_status == "unpublished":
+            status_text = document.get("status", release_status or "unpublished")
+            gap = document.get("known_provenance_gap")
+            detail = f"repository provenance declares this commit unpublished ({status_text})"
+            if isinstance(gap, str) and gap:
+                detail += f": {gap}"
+            raise QualificationError(detail)
+
+    def macos_candidate_gate(
+        self,
+        name: str,
+        product: dict[str, Any],
+        commit: str,
+    ) -> dict[str, Any]:
+        path = self.state_root / "candidates" / name / f"{commit}.json"
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or stat.S_IMODE(path.stat().st_mode) & 0o022
+        ):
+            raise QualificationError(
+                f"trusted native-Mac candidate is missing or unsafe: {path}"
+            )
+        document = load_json(path)
+        qualification = document.get("qualification")
+        expected = {
+            "schema_version": 1,
+            "status": "qualified_candidate",
+            "product": product["product"],
+            "qualification_lane": "macos",
+            "source_commit": commit,
+        }
+        for key, value in expected.items():
+            if document.get(key) != value:
+                raise QualificationError(
+                    f"native-Mac candidate mismatch for {key}: {document.get(key)!r}"
+                )
+        if not isinstance(qualification, dict) or qualification.get("status") != "passed":
+            raise QualificationError("native-Mac candidate qualification did not pass")
+        document["_candidate_sha256"] = sha256_file(path)
+        return document
+
+    def test_tmp(self, checkout: Path) -> Path:
+        path = checkout / ".publisher-test-tmp"
+        path.mkdir(mode=0o700, exist_ok=False)
+        if os.geteuid() == 0:
+            os.chown(path, self.user_record.pw_uid, self.user_record.pw_gid)
+        return path
+
+    def qualify_terminal(self, checkout: Path) -> dict[str, Any]:
+        profile_path = checkout / "runtime" / "debian-13-amd64.json"
+        lock_path = checkout / "runtime" / "python-debian13-amd64-py313.lock"
+        if (
+            not profile_path.is_file()
+            or profile_path.is_symlink()
+            or not lock_path.is_file()
+            or lock_path.is_symlink()
+        ):
+            raise QualificationError("Debian runtime profile or Python hash lock is missing")
+        profile = load_json(profile_path)
+        platform = profile.get("platform")
+        if not isinstance(platform, dict):
+            raise QualificationError("Debian runtime profile platform is invalid")
+        expected = {
+            "os_release_id": "debian",
+            "os_release_version_id": "13",
+            "architecture": "amd64",
+            "python_implementation": "CPython",
+            "python_version": "3.13",
+        }
+        for key, value in expected.items():
+            if platform.get(key) != value:
+                raise QualificationError(
+                    f"Debian runtime profile mismatch for {key}: {platform.get(key)!r}"
+                )
+
+        venv = self.state_root / "venvs" / "terminal"
+        if not (venv / "bin" / "python").exists():
+            self.run_user(["/usr/bin/python3", "-m", "venv", str(venv)], timeout=300)
+        install = self.run_user(
+            [
+                str(venv / "bin" / "python"),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "-e",
+                ".[test]",
+            ],
+            cwd=checkout,
+            timeout=900,
+            check=False,
+        )
+        if install.returncode != 0:
+            raise PublisherError(
+                "terminal qualification environment could not be prepared:\n"
+                + bounded_output(install.stdout)
+            )
+
+        lock_check = self.run_user(
+            [
+                str(venv / "bin" / "python"),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--dry-run",
+                "--require-hashes",
+                "--only-binary=:all:",
+                "-r",
+                str(lock_path),
+            ],
+            cwd=checkout,
+            timeout=900,
+            check=False,
+        )
+        if lock_check.returncode != 0:
+            raise PublisherError(
+                "terminal Python hash-lock dry run could not complete:\n"
+                + bounded_output(lock_check.stdout)
+            )
+
+        temporary = self.test_tmp(checkout)
+        result = self.run_user(
+            [str(venv / "bin" / "python"), "-m", "pytest", "-q"],
+            cwd=checkout,
+            extra_env={"TMPDIR": str(temporary)},
+            timeout=1800,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise QualificationError(
+                "terminal Debian test lane failed:\n" + bounded_output(result.stdout)
+            )
+        counts = parse_pytest_counts(result.stdout)
+        python_version = self.run_user(
+            [str(venv / "bin" / "python"), "-c", "import platform; print(platform.python_version())"],
+            cwd=checkout,
+        ).stdout.strip()
+        external_status = self.verify_terminal_external_payloads(profile, profile_path)
+        playwright = profile.get("playwright")
+        return {
+            "python": python_version,
+            "pytest": counts,
+            "profile": profile,
+            "profile_path": profile_path,
+            "lock_path": lock_path,
+            "python_hash_lock_dry_run": "passed",
+            "external_payload_hashes_verified": external_status,
+            "playwright": playwright if isinstance(playwright, dict) else {},
+        }
+
+    def qualify_terminal_macos(
+        self,
+        name: str,
+        checkout: Path,
+        product: dict[str, Any],
+        commit: str,
+    ) -> dict[str, Any]:
+        candidate = self.macos_candidate_gate(name, product, commit)
+        source_tree = self.run_user(
+            ["/usr/bin/git", "-C", str(checkout), "rev-parse", f"{commit}^{{tree}}"],
+            cwd=checkout,
+            timeout=60,
+        ).stdout.strip()
+        if candidate.get("source_git_tree") != source_tree:
+            raise QualificationError("native-Mac candidate source tree is inconsistent")
+        profile_path = checkout / "runtime" / "macos-26-arm64.json"
+        lock_path = checkout / "runtime" / "python-macos26-arm64-py314.lock"
+        requirements_path = checkout / "runtime" / "component-requirements.json"
+        aider_lock_path = checkout / "runtime" / "aider-macos-arm64-py312.lock"
+        for path, label in (
+            (profile_path, "Mac runtime profile"),
+            (lock_path, "Mac Python lock"),
+            (requirements_path, "component requirements"),
+            (aider_lock_path, "Aider artifact lock"),
+        ):
+            if not path.is_file() or path.is_symlink():
+                raise QualificationError(f"{label} is missing or unsafe")
+
+        profile = load_json(profile_path)
+        platform = profile.get("platform")
+        expected_platform = {
+            "os_release_id": "macos",
+            "os_release_version_id": "26",
+            "architecture": "arm64",
+            "uname_machine": "arm64",
+            "python_implementation": "CPython",
+            "python_version": "3.14",
+        }
+        if not isinstance(platform, dict):
+            raise QualificationError("Mac runtime profile platform is invalid")
+        for key, value in expected_platform.items():
+            if platform.get(key) != value:
+                raise QualificationError(
+                    f"Mac runtime profile mismatch for {key}: {platform.get(key)!r}"
+                )
+        if (
+            profile.get("profile") != "macos-26-arm64-python3.14"
+            or profile.get("python", {}).get("lock_file")
+            != "runtime/python-macos26-arm64-py314.lock"
+            or profile.get("python", {}).get("lock_sha256") != sha256_file(lock_path)
+        ):
+            raise QualificationError("Mac runtime profile does not bind its Python lock")
+
+        requirements = load_json(requirements_path)
+        components = (
+            requirements.get("capabilities", {})
+            .get("build", {})
+            .get("components", [])
+        )
+        aider = [
+            item for item in components
+            if isinstance(item, dict) and item.get("id") == "aider"
+        ]
+        if len(aider) != 1:
+            raise QualificationError("Mac component requirements do not declare one Aider")
+        artifact_lock = aider[0].get("artifact_lock")
+        actual_package_count = len(
+            re.findall(
+                rb"(?m)^[A-Za-z0-9_.-]+==[^\r\n ]+",
+                aider_lock_path.read_bytes(),
+            )
+        )
+        expected_aider = {
+            "path": "runtime/aider-macos-arm64-py312.lock",
+            "sha256": sha256_file(aider_lock_path),
+            "format": "uv-requirements",
+            "hash_mode": "required",
+            "binary_only": True,
+            "platform": "macos-arm64",
+            "package_count": actual_package_count,
+        }
+        if (
+            aider[0].get("version") != "0.86.2"
+            or aider[0].get("python_version") != "3.12"
+            or not isinstance(artifact_lock, dict)
+            or any(artifact_lock.get(key) != value for key, value in expected_aider.items())
+        ):
+            raise QualificationError("Mac Aider artifact-lock declaration is inconsistent")
+        dependencies = candidate.get("dependency_locks")
+        if not isinstance(dependencies, dict) or any(
+            dependencies.get(key) != value
+            for key, value in {
+                "aider_python": "3.12",
+                "aider_package_count": actual_package_count,
+                "aider_lock_sha256": sha256_file(aider_lock_path),
+            }.items()
+        ):
+            raise QualificationError("native-Mac candidate does not bind the Aider lock")
+        if candidate.get("runtime_profile") != profile["profile"]:
+            raise QualificationError("native-Mac candidate runtime profile is inconsistent")
+
+        external_status = self.verify_terminal_external_payloads(
+            profile, profile_path, "terminal/macos"
+        )
+        return {
+            "python": "3.14",
+            "pytest": candidate["qualification"].get("pytest", {}),
+            "profile": profile,
+            "profile_path": profile_path,
+            "profile_relative_path": "runtime/macos-26-arm64.json",
+            "lock_path": lock_path,
+            "lock_relative_path": "runtime/python-macos26-arm64-py314.lock",
+            "aider_lock_path": aider_lock_path,
+            "aider_lock_relative_path": "runtime/aider-macos-arm64-py312.lock",
+            "aider_lock": expected_aider,
+            "python_hash_lock_dry_run": "passed_on_native_candidate",
+            "aider_hash_lock_dry_run": "passed_on_native_candidate",
+            "external_payload_hashes_verified": external_status,
+            "playwright": profile.get("playwright", {}),
+            "candidate": candidate,
+        }
+
+    def verify_terminal_external_payloads(
+        self,
+        profile: dict[str, Any],
+        profile_path: Path,
+        public_path: str = "terminal",
+    ) -> str:
+        profile_sha = sha256_file(profile_path)
+        manifest_path = self.public_root / public_path / "manifest.json"
+        if manifest_path.exists():
+            manifest = load_json(manifest_path)
+            for item in manifest.get("runtime_profiles", []):
+                if (
+                    isinstance(item, dict)
+                    and isinstance(item.get("profile"), dict)
+                    and item["profile"].get("sha256") == profile_sha
+                ):
+                    receipt_url = manifest.get("release_receipt", {}).get("url")
+                    if isinstance(receipt_url, str):
+                        receipt_path = self.local_download_path(receipt_url)
+                        if receipt_path.is_file():
+                            receipt = load_json(receipt_path)
+                            runtime = receipt.get(
+                                "macos_runtime", receipt.get("debian_runtime", {})
+                            )
+                            if isinstance(runtime, dict) and runtime.get(
+                                "external_payload_hashes_verified"
+                            ) is True:
+                                return "passed_reused_verified_profile"
+
+        playwright = profile.get("playwright")
+        artifacts = playwright.get("artifacts") if isinstance(playwright, dict) else None
+        if not isinstance(artifacts, list) or not artifacts:
+            raise QualificationError("runtime profile has no Playwright artifacts")
+        cache = self.state_root / "cache" / "artifacts"
+        cache.mkdir(mode=0o700, exist_ok=True)
+        if os.geteuid() == 0:
+            os.chown(cache, self.user_record.pw_uid, self.user_record.pw_gid)
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                raise QualificationError("runtime profile contains an invalid artifact")
+            url = artifact.get("url")
+            expected_sha = artifact.get("sha256")
+            expected_bytes = artifact.get("bytes")
+            if (
+                not isinstance(url, str)
+                or urlparse(url).scheme != "https"
+                or urlparse(url).hostname != "cdn.playwright.dev"
+                or not isinstance(expected_sha, str)
+                or not HEX256_RE.fullmatch(expected_sha)
+                or not isinstance(expected_bytes, int)
+                or expected_bytes <= 0
+            ):
+                raise QualificationError("runtime profile artifact identity is invalid")
+            cached = cache / expected_sha
+            if cached.is_file() and cached.stat().st_size == expected_bytes:
+                if sha256_file(cached) == expected_sha:
+                    continue
+                cached.unlink()
+            temporary = cache / f".{expected_sha}.download-{os.getpid()}"
+            result = self.run_user(
+                [
+                    "/usr/bin/curl",
+                    "--fail",
+                    "--location",
+                    "--proto",
+                    "=https",
+                    "--tlsv1.2",
+                    "--output",
+                    str(temporary),
+                    url,
+                ],
+                timeout=1800,
+                check=False,
+            )
+            if result.returncode != 0:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+                raise PublisherError(
+                    f"could not retrieve declared runtime artifact {url}:\n"
+                    + bounded_output(result.stdout)
+                )
+            if temporary.stat().st_size != expected_bytes or sha256_file(temporary) != expected_sha:
+                temporary.unlink()
+                raise QualificationError(f"runtime artifact identity mismatch: {url}")
+            os.replace(temporary, cached)
+        return "passed"
+
+    def qualify_node(self, checkout: Path, product: dict[str, Any]) -> dict[str, Any]:
+        self.provenance_gate(checkout)
+        temporary = self.test_tmp(checkout)
+        node = str(self.config["node_binary"])
+        test_files = product.get("debian_test_files")
+        if not isinstance(test_files, list) or not test_files:
+            raise PublisherError("node-adapters debian_test_files is missing")
+        for relative in test_files:
+            if not isinstance(relative, str) or not (checkout / relative).is_file():
+                raise QualificationError(f"configured Debian test file is missing: {relative}")
+        js_result = self.run_user(
+            [node, "--test", "--test-concurrency=1", *test_files],
+            cwd=checkout,
+            extra_env={
+                "TMPDIR": str(temporary),
+                "PATH": f"{Path(node).parent}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            },
+            timeout=1800,
+            check=False,
+        )
+        if js_result.returncode != 0:
+            raise QualificationError(
+                "Agent Node Debian/shared JavaScript test lane failed:\n"
+                + bounded_output(js_result.stdout)
+            )
+        js_counts = parse_node_counts(js_result.stdout)
+        py_result = self.run_user(
+            [
+                "/usr/bin/python3",
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "test",
+                "-p",
+                "*_test.py",
+            ],
+            cwd=checkout,
+            extra_env={"TMPDIR": str(temporary)},
+            timeout=900,
+            check=False,
+        )
+        if py_result.returncode != 0:
+            raise QualificationError(
+                "Agent Node Python test lane failed:\n" + bounded_output(py_result.stdout)
+            )
+        python_count = parse_unittest_count(py_result.stdout)
+        binding = self.verify_terminal_binding(
+            checkout / "components" / "tof-terminal" / "debian-13-amd64.json"
+        )
+        node_version = self.run_user([node, "--version"]).stdout.strip().removeprefix("v")
+        return {
+            "node": node_version,
+            "tests": {
+                "passed": js_counts["passed"] + python_count,
+                "failed": 0,
+                "skipped": js_counts["skipped"],
+                "javascript_passed": js_counts["passed"],
+                "python_passed": python_count,
+            },
+            "terminal_binding": binding,
+        }
+
+    def qualify_node_macos(
+        self,
+        name: str,
+        checkout: Path,
+        product: dict[str, Any],
+        commit: str,
+    ) -> dict[str, Any]:
+        candidate = self.macos_candidate_gate(name, product, commit)
+        source_tree = self.run_user(
+            ["/usr/bin/git", "-C", str(checkout), "rev-parse", f"{commit}^{{tree}}"],
+            cwd=checkout,
+            timeout=60,
+        ).stdout.strip()
+        if candidate.get("source_git_tree") != source_tree:
+            raise QualificationError("native-Mac candidate source tree is inconsistent")
+        provenance_path = checkout / "export-provenance.json"
+        if not provenance_path.is_file() or provenance_path.is_symlink():
+            raise QualificationError("Agent Node source provenance is missing")
+        provenance = load_json(provenance_path)
+        dependency = provenance.get("dependency_provenance", {}).get("aider")
+        expected_lock_sha = (
+            candidate.get("dependency_locks", {}).get("aider_lock_sha256")
+        )
+        if (
+            provenance.get("status") != "source_sync_only"
+            or provenance.get("published") is not False
+            or provenance.get("release", {}).get("status") != "unpublished"
+            or not isinstance(dependency, dict)
+            or dependency.get("artifact_lock_sha256") != expected_lock_sha
+            or dependency.get("artifact_package_count") != 108
+            or dependency.get("install_contract")
+            != "uv-pip-require-hashes-strict-binary-only"
+            or candidate.get("source_composite_tree_sha256")
+            != provenance.get("standalone_composite_tree", {}).get("sha256")
+        ):
+            raise QualificationError(
+                "Agent Node source provenance does not bind the admitted Mac Aider closure"
+            )
+        manifest_path = self.public_root / "terminal" / "macos" / "manifest.json"
+        if not manifest_path.is_file() or manifest_path.is_symlink():
+            raise QualificationError("Mac TOF-Terminal release must be published first")
+        manifest = load_json(manifest_path)
+        profiles = manifest.get("runtime_profiles")
+        matches = [
+            item for item in profiles
+            if isinstance(item, dict)
+            and item.get("id") == "macos-26-arm64-python3.14"
+            and item.get("qualification_lane") == "macos"
+        ] if isinstance(profiles, list) else []
+        if len(matches) != 1:
+            raise QualificationError("published Mac Terminal manifest is malformed")
+        archive = manifest.get("archive")
+        profile = matches[0].get("profile")
+        python_lock = matches[0].get("python_lock")
+        if not all(isinstance(item, dict) for item in (archive, profile, python_lock)):
+            raise QualificationError("published Mac Terminal identities are malformed")
+        self.verify_bound_file(archive, "Mac archive")
+        self.verify_bound_file(profile, "Mac runtime profile")
+        self.verify_bound_file(python_lock, "Mac Python lock")
+        terminal_commit = manifest.get("commit")
+        if (
+            not isinstance(terminal_commit, str)
+            or not SHA_RE.fullmatch(terminal_commit)
+            or candidate.get("terminal_source_commit") != terminal_commit
+        ):
+            raise QualificationError(
+                "native-Mac Agent Node candidate does not bind the published Terminal"
+            )
+        tests = candidate.get("qualification", {}).get("tests")
+        if not isinstance(tests, dict) or tests.get("failed") != 0:
+            raise QualificationError("native-Mac Agent Node test evidence is invalid")
+        return {
+            "node": candidate.get("node_version", "22.22.2"),
+            "tests": tests,
+            "candidate": candidate,
+            "terminal_binding": {
+                "qualification_lane": "macos",
+                "commit": terminal_commit,
+                "archive_sha256": archive["sha256"],
+                "runtime_profile_sha256": profile["sha256"],
+                "python_lock_sha256": python_lock["sha256"],
+                "installed": False,
+                "query_ready": False,
+                "build_ready": False,
+            },
+        }
+
+    def local_download_path(self, url: str) -> Path:
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or parsed.hostname != "downloads.techoverfl.com":
+            raise QualificationError(f"binding URL is outside downloads.techoverfl.com: {url}")
+        relative = Path(unquote(parsed.path).lstrip("/"))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise QualificationError(f"binding URL has an unsafe path: {url}")
+        candidate = self.public_root / relative
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(self.public_root)
+        except ValueError as exc:
+            raise QualificationError(f"binding URL escapes the public root: {url}") from exc
+        if resolved != candidate.absolute():
+            raise QualificationError(f"binding URL traverses a symbolic link: {url}")
+        return resolved
+
+    def verify_bound_file(self, item: dict[str, Any], label: str) -> Path:
+        url = item.get("url")
+        expected_sha = item.get("sha256")
+        expected_bytes = item.get("bytes")
+        if (
+            not isinstance(url, str)
+            or not isinstance(expected_sha, str)
+            or not HEX256_RE.fullmatch(expected_sha)
+            or not isinstance(expected_bytes, int)
+            or expected_bytes <= 0
+        ):
+            raise QualificationError(f"terminal binding {label} identity is invalid")
+        path = self.local_download_path(url)
+        if not path.is_file() or path.is_symlink():
+            raise QualificationError(f"terminal binding {label} is not published locally")
+        if path.stat().st_size != expected_bytes or sha256_file(path) != expected_sha:
+            raise QualificationError(f"terminal binding {label} does not match published bytes")
+        return path
+
+    def verify_terminal_binding(self, path: Path) -> dict[str, Any]:
+        if not path.is_file():
+            raise QualificationError("Agent Node Debian terminal component binding is missing")
+        document = load_json(path)
+        source = document.get("source")
+        archive = document.get("archive")
+        profile = document.get("runtime_profile")
+        lock = document.get("python_lock")
+        if not all(isinstance(item, dict) for item in (source, archive, profile, lock)):
+            raise QualificationError("Agent Node terminal component binding is malformed")
+        commit = source.get("commit")
+        if not isinstance(commit, str) or not SHA_RE.fullmatch(commit):
+            raise QualificationError("Agent Node terminal binding has an invalid commit")
+        self.verify_bound_file(archive, "archive")
+        self.verify_bound_file(profile, "runtime profile")
+        self.verify_bound_file(lock, "Python lock")
+        public_manifest = load_json(self.public_root / "terminal" / "manifest.json")
+        # The binding may intentionally reference an older immutable release. It must
+        # not claim the current pointer unless every current identity also agrees.
+        if public_manifest.get("commit") == commit:
+            if public_manifest.get("archive", {}).get("sha256") != archive.get("sha256"):
+                raise QualificationError("terminal binding conflicts with the current manifest")
+        return {
+            "qualification_lane": document.get("qualification_lane"),
+            "commit": commit,
+            "archive_sha256": archive["sha256"],
+            "runtime_profile_sha256": profile["sha256"],
+            "python_lock_sha256": lock["sha256"],
+            "installed": False,
+            "query_ready": False,
+            "build_ready": False,
+        }
+
+    def make_archive(
+        self,
+        checkout: Path,
+        product: dict[str, Any],
+        commit: str,
+        staging: Path,
+    ) -> dict[str, Any]:
+        short = commit[:12]
+        root = f"{product['archive_prefix']}-{short}"
+        filename = f"{root}.tar.gz"
+        first_tar = staging / ".archive-first.tar"
+        second_tar = staging / ".archive-second.tar"
+        first_gzip = staging / filename
+        second_gzip = staging / ".archive-second.tar.gz"
+        for destination in (first_tar, second_tar):
+            result = self.run_user(
+                [
+                    "/usr/bin/git",
+                    "-C",
+                    str(checkout),
+                    "archive",
+                    "--format=tar",
+                    f"--prefix={root}/",
+                    f"--output={destination}",
+                    commit,
+                ],
+                cwd=checkout,
+                timeout=300,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise PublisherError("git archive failed: " + bounded_output(result.stdout))
+        for source, destination in ((first_tar, first_gzip), (second_tar, second_gzip)):
+            with source.open("rb") as raw, destination.open("wb") as output:
+                with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=0) as compressed:
+                    shutil.copyfileobj(raw, compressed, length=1024 * 1024)
+        if sha256_file(first_gzip) != sha256_file(second_gzip):
+            raise QualificationError("reproducible archive check failed")
+        first_tar.unlink()
+        second_tar.unlink()
+        second_gzip.unlink()
+        os.chmod(first_gzip, 0o644)
+        return {
+            "filename": filename,
+            "path": first_gzip,
+            "bytes": first_gzip.stat().st_size,
+            "sha256": sha256_file(first_gzip),
+            "root_directory": root,
+        }
+
+    def installer_for(
+        self,
+        current: Path,
+        commit: str,
+        archive_sha: str,
+        *,
+        base_url: str | None = None,
+        macos: bool = False,
+    ) -> bytes:
+        try:
+            if current.is_symlink() or not current.is_file():
+                raise OSError("installer is not a regular non-symlink file")
+            text = current.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise PublisherError(f"cannot read installer template {current}: {exc}") from exc
+        replacements = {
+            r'(?m)^readonly RELEASE_COMMIT="[^"]+"$': f'readonly RELEASE_COMMIT="{commit}"',
+            r'(?m)^readonly RELEASE_SHORT="[^"]+"$': f'readonly RELEASE_SHORT="{commit[:12]}"',
+            r'(?m)^readonly ARCHIVE_SHA256="[^"]+"$': f'readonly ARCHIVE_SHA256="{archive_sha}"',
+        }
+        for pattern, replacement in replacements.items():
+            text, count = re.subn(pattern, replacement, text)
+            if count != 1:
+                raise PublisherError(
+                    f"installer template did not contain exactly one expected field: {pattern}"
+                )
+        if base_url is not None:
+            text, count = re.subn(
+                r'(?m)^readonly BASE_URL="[^"]+"$',
+                f'readonly BASE_URL="{base_url}"',
+                text,
+            )
+            if count != 1:
+                raise PublisherError("installer template has no exact BASE_URL field")
+        if macos:
+            text, count = re.subn(
+                r"(?m)^(for required_command in .*) sha256sum (.*; do)$",
+                r"\1 \2",
+                text,
+            )
+            if count != 1:
+                raise PublisherError(
+                    "installer template has no exact prerequisite command list"
+                )
+            checksum = (
+                'if command -v sha256sum >/dev/null 2>&1; then\n'
+                '  printf \'%s  %s\\n\' "${ARCHIVE_SHA256}" "${archive_path}" | '
+                'sha256sum --check --status\n'
+                'elif command -v shasum >/dev/null 2>&1; then\n'
+                '  [ "$(shasum -a 256 "${archive_path}" | awk \'{print $1}\')" = '
+                '"${ARCHIVE_SHA256}" ]\n'
+                'else\n'
+                '  echo "[installer] required checksum command is unavailable" >&2\n'
+                '  exit 1\n'
+                'fi'
+            )
+            text, count = re.subn(
+                r'printf \'%s  %s\\n\' "\$\{ARCHIVE_SHA256\}" "\$\{archive_path\}"'
+                r' \| sha256sum --check --status',
+                lambda _match: checksum,
+                text,
+            )
+            if count != 1:
+                raise PublisherError(
+                    "installer template has no exact SHA-256 verification statement"
+                )
+        return text.encode("utf-8")
+
+    def terminal_documents(
+        self,
+        product: dict[str, Any],
+        commit: str,
+        archive: dict[str, Any],
+        tracked_count: int,
+        validation: dict[str, Any],
+        staging: Path,
+        published_at: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], bytes]:
+        public_path = str(product["public_path"])
+        lane = str(product["qualification_lane"])
+        profile_relative = validation.get(
+            "profile_relative_path", "runtime/debian-13-amd64.json"
+        )
+        lock_relative = validation.get(
+            "lock_relative_path", "runtime/python-debian13-amd64-py313.lock"
+        )
+        release_url = (
+            f"https://downloads.techoverfl.com/{public_path}/releases/{commit}"
+        )
+        runtime = staging / "runtime"
+        runtime.mkdir(mode=0o755)
+        profile_target = staging / profile_relative
+        lock_target = staging / lock_relative
+        shutil.copyfile(validation["profile_path"], profile_target)
+        shutil.copyfile(validation["lock_path"], lock_target)
+        os.chmod(profile_target, 0o644)
+        os.chmod(lock_target, 0o644)
+        profile_sha = sha256_file(profile_target)
+        lock_sha = sha256_file(lock_target)
+        playwright = validation["playwright"]
+        artifacts = playwright.get("artifacts", [])
+        revisions = {
+            item.get("component"): item.get("revision")
+            for item in artifacts
+            if isinstance(item, dict)
+        }
+        runtime_receipt = {
+            "profile": validation["profile"].get("profile"),
+            "profile_filename": profile_relative,
+            "profile_sha256": profile_sha,
+            "python_lock_filename": lock_relative,
+            "python_lock_sha256": lock_sha,
+            "playwright_version": playwright.get("version"),
+            "chromium_revision": revisions.get("chromium"),
+            "ffmpeg_revision": revisions.get("ffmpeg"),
+            "external_payload_hashes_verified": True,
+            "external_payload_verification": validation[
+                "external_payload_hashes_verified"
+            ],
+            "python_hash_lock_dry_run": validation["python_hash_lock_dry_run"],
+        }
+        if lane == "macos":
+            aider_target = staging / validation["aider_lock_relative_path"]
+            shutil.copyfile(validation["aider_lock_path"], aider_target)
+            os.chmod(aider_target, 0o644)
+            runtime_receipt.update(
+                {
+                    "aider_lock_filename": validation["aider_lock_relative_path"],
+                    "aider_lock_sha256": sha256_file(aider_target),
+                    "aider_package_count": validation["aider_lock"]["package_count"],
+                    "aider_hash_lock_dry_run": validation["aider_hash_lock_dry_run"],
+                    "native_candidate_sha256": validation["candidate"][
+                        "_candidate_sha256"
+                    ],
+                }
+            )
+        receipt = {
+            "schema_version": 2,
+            "product": "tof-terminal",
+            "source": {
+                "repository": product["repository_ssh"],
+                "ref": product["ref"],
+                "commit": commit,
+            },
+            "artifact": {
+                "filename": archive["filename"],
+                "bytes": archive["bytes"],
+                "sha256": archive["sha256"],
+                "root_directory": archive["root_directory"],
+                "tracked_file_count": tracked_count,
+                "reproducible_archive_check": "passed",
+                "browser_payload_embedded": False,
+            },
+            f"{lane}_runtime": runtime_receipt,
+            "validation": {
+                "python": validation["python"],
+                "pytest": validation["pytest"],
+                "credential_pattern_scan": "passed",
+            },
+            "qualification": {
+                "lane": "macos-26-arm64" if lane == "macos" else "debian-13-amd64",
+                "native_evidence": (
+                    "trusted_candidate" if lane == "macos" else "publisher_native"
+                ),
+            },
+            "signature": {
+                "status": "not_configured",
+                "reason": "No dedicated release-signing key is configured on the secure publisher.",
+            },
+            "published_at": published_at,
+        }
+        manifest = {
+            "schema_version": 1,
+            "product": "tof-terminal",
+            "channel": "github-main",
+            "repository": product["repository_https"],
+            "ref": product["ref"],
+            "commit": commit,
+            "published_at": published_at,
+            "archive": {
+                "filename": archive["filename"],
+                "url": f"{release_url}/{archive['filename']}",
+                "content_type": "application/gzip",
+                "bytes": archive["bytes"],
+                "sha256": archive["sha256"],
+                "root_directory": archive["root_directory"],
+            },
+            "checksums": {"url": f"{release_url}/SHA256SUMS"},
+            "release_receipt": {"url": f"{release_url}/release-receipt.json"},
+            "runtime_profiles": [
+                {
+                    "id": validation["profile"].get(
+                        "profile", "debian-13-amd64-python3.13"
+                    ),
+                    "qualification_lane": lane,
+                    "profile": {
+                        "url": f"{release_url}/{profile_relative}",
+                        "bytes": profile_target.stat().st_size,
+                        "sha256": profile_sha,
+                    },
+                    "python_lock": {
+                        "url": f"{release_url}/{lock_relative}",
+                        "bytes": lock_target.stat().st_size,
+                        "sha256": lock_sha,
+                    },
+                    "browser_payload_embedded": False,
+                }
+            ],
+            "other_platforms": (
+                {"ubuntu": "unqualified", "debian": "separate_channel"}
+                if lane == "macos"
+                else {"ubuntu": "unqualified", "macos": "unqualified"}
+            ),
+            "signature": {"status": "not_configured"},
+            "installer": {
+                "url": f"https://downloads.techoverfl.com/{public_path}/install.sh",
+                "verifies_archive_sha256": True,
+                "verifies_archive_signature": False,
+                "supports_verify_only": True,
+            },
+        }
+        readme = f"""TOF Terminal downloads
+======================
+
+Machine manifest:
+  https://downloads.techoverfl.com/{public_path}/manifest.json
+
+Human installer:
+  https://downloads.techoverfl.com/{public_path}/install.sh
+
+Current GitHub commit:
+  {commit}
+
+Commit-addressed archive:
+  {release_url}/{archive['filename']}
+
+SHA-256:
+  {archive['sha256']}
+
+This pointer is qualified only for {
+    "macOS 26 arm64 with CPython 3.14" if lane == "macos"
+    else "Debian 13 amd64 with CPython 3.13"
+}. Other operating systems remain independent release lanes. Browser payloads
+are not embedded in the application archive. The installer verifies the
+immutable archive before installation; use --verify-only for admission without
+installing.
+"""
+        return receipt, manifest, readme.encode("utf-8")
+
+    def node_documents(
+        self,
+        product: dict[str, Any],
+        commit: str,
+        archive: dict[str, Any],
+        tracked_count: int,
+        validation: dict[str, Any],
+        published_at: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], bytes]:
+        public_path = str(product["public_path"])
+        lane = str(product["qualification_lane"])
+        release_url = (
+            f"https://downloads.techoverfl.com/{public_path}/releases/{commit}"
+        )
+        binding = validation["terminal_binding"]
+        receipt_binding = {
+            "qualification_lane": binding["qualification_lane"],
+            "terminal_commit": binding["commit"],
+            "terminal_archive_sha256": binding["archive_sha256"],
+            "terminal_profile_sha256": binding["runtime_profile_sha256"],
+            "terminal_python_lock_sha256": binding["python_lock_sha256"],
+            "terminal_installed": False,
+            "query_ready": False,
+            "build_ready": False,
+        }
+        receipt = {
+            "schema_version": 2,
+            "product": "tof-agent-node",
+            "source": {
+                "repository": product["repository_ssh"],
+                "ref": product["ref"],
+                "commit": commit,
+            },
+            "artifact": {
+                "filename": archive["filename"],
+                "bytes": archive["bytes"],
+                "sha256": archive["sha256"],
+                "root_directory": archive["root_directory"],
+                "tracked_file_count": tracked_count,
+                "reproducible_archive_check": "passed",
+            },
+            "validation": {
+                "node": validation["node"],
+                "tests": validation["tests"],
+                "credential_pattern_scan": "passed",
+                "terminal_public_admission_verifier": "passed",
+            },
+            "terminal_binding": receipt_binding,
+            "qualification": {
+                "lane": "macos-26-arm64" if lane == "macos" else "debian-13-amd64",
+                "native_evidence": (
+                    "trusted_candidate" if lane == "macos" else "publisher_native"
+                ),
+                "native_candidate_sha256": (
+                    validation["candidate"]["_candidate_sha256"]
+                    if lane == "macos" else None
+                ),
+            },
+            "signature": {
+                "status": "not_configured",
+                "reason": "No dedicated release-signing key is configured on the secure publisher.",
+            },
+            "published_at": published_at,
+        }
+        manifest = {
+            "schema_version": 1,
+            "product": "tof-agent-node",
+            "channel": "github-main",
+            "repository": product["repository_https"],
+            "ref": product["ref"],
+            "commit": commit,
+            "published_at": published_at,
+            "archive": {
+                "filename": archive["filename"],
+                "url": f"{release_url}/{archive['filename']}",
+                "content_type": "application/gzip",
+                "bytes": archive["bytes"],
+                "sha256": archive["sha256"],
+                "root_directory": archive["root_directory"],
+            },
+            "checksums": {"url": f"{release_url}/SHA256SUMS"},
+            "release_receipt": {"url": f"{release_url}/release-receipt.json"},
+            "component_bindings": {"tof-terminal": binding},
+            "other_platforms": (
+                {"ubuntu": "unqualified", "debian": "separate_channel"}
+                if lane == "macos"
+                else {"ubuntu": "unqualified", "macos": "unqualified"}
+            ),
+            "signature": {"status": "not_configured"},
+            "installer": {
+                "url": f"https://downloads.techoverfl.com/{public_path}/install.sh",
+                "verifies_archive_sha256": True,
+                "verifies_archive_root": True,
+                "supports_verify_only": True,
+            },
+        }
+        readme = f"""TOF Agent Node downloads
+========================
+
+Machine manifest:
+  https://downloads.techoverfl.com/{public_path}/manifest.json
+
+Human installer:
+  https://downloads.techoverfl.com/{public_path}/install.sh
+
+Current GitHub commit:
+  {commit}
+
+Commit-addressed archive:
+  {release_url}/{archive['filename']}
+
+SHA-256:
+  {archive['sha256']}
+
+This release is admitted on the {
+    "trusted native macOS 26 arm64 candidate lane"
+    if lane == "macos" else "Debian 13 amd64/shared test lane"
+} and binds immutable TOF Terminal release {binding['commit']}. Other operating
+systems remain separate release lanes. Use --verify-only to validate the
+archive without installing.
+"""
+        return receipt, manifest, readme.encode("utf-8")
+
+    def normalize_tree(self, root: Path) -> None:
+        for directory, directories, files in os.walk(root):
+            os.chmod(directory, 0o755)
+            for name in directories:
+                os.chmod(Path(directory) / name, 0o755)
+            for name in files:
+                os.chmod(Path(directory) / name, 0o644)
+
+    def promote(
+        self,
+        product: dict[str, Any],
+        commit: str,
+        staging: Path,
+        manifest: dict[str, Any],
+        installer: bytes,
+        readme: bytes,
+    ) -> None:
+        product_root = self.public_root / str(product["public_path"])
+        releases = product_root / "releases"
+        releases.mkdir(parents=True, mode=0o755, exist_ok=True)
+        destination = releases / commit
+        if destination.exists():
+            expected = manifest["archive"]["sha256"]
+            existing = destination / manifest["archive"]["filename"]
+            if not existing.is_file() or sha256_file(existing) != expected:
+                raise PublisherError(
+                    f"immutable release directory already exists with different content: {destination}"
+                )
+        else:
+            hidden = releases / f".staging-{commit}-{os.getpid()}"
+            if hidden.exists():
+                raise PublisherError(f"unexpected publication staging path exists: {hidden}")
+            shutil.copytree(staging, hidden, symlinks=True)
+            self.normalize_tree(hidden)
+            os.replace(hidden, destination)
+            directory_fd = os.open(releases, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        atomic_write(product_root / "install.sh", installer, 0o755)
+        atomic_write(product_root / "README.txt", readme, 0o644)
+        # The manifest is the public pointer and is deliberately switched last.
+        write_json(product_root / "manifest.json", manifest, 0o644)
+
+    def sync_one(
+        self, name: str, *, retry_failed: bool = False
+    ) -> dict[str, Any]:
+        if name not in self.products:
+            raise PublisherError(f"unknown product: {name}")
+        product = self.products[name]
+        remote = self.remote_sha(product)
+        published = self.published_sha(product)
+        if remote == published:
+            self.clear_failure(name)
+            return {
+                "product": name,
+                "status": "current",
+                "commit": remote,
+            }
+        if not retry_failed and remote == self.failed_sha(name):
+            failure = load_json(self.failed_path(name))
+            return {
+                "product": name,
+                "status": "qualification_blocked_cached",
+                "commit": remote,
+                "reason": failure.get("reason"),
+            }
+
+        checkout: Path | None = None
+        staging: Path | None = None
+        try:
+            checkout = self.make_checkout(name, product, remote)
+            tracked = self.tracked_files(checkout)
+            self.credential_scan(checkout, tracked)
+            product_type = str(product["product"])
+            lane = str(product["qualification_lane"])
+            if product_type == "terminal" and lane == "debian":
+                self.provenance_gate(checkout)
+                validation = self.qualify_terminal(checkout)
+            elif product_type == "terminal" and lane == "macos":
+                validation = self.qualify_terminal_macos(
+                    name, checkout, product, remote
+                )
+            elif product_type == "node-adapters" and lane == "debian":
+                validation = self.qualify_node(checkout, product)
+            elif product_type == "node-adapters" and lane == "macos":
+                validation = self.qualify_node_macos(
+                    name, checkout, product, remote
+                )
+            else:
+                raise PublisherError(
+                    f"no qualification implementation for {product_type}/{lane}"
+                )
+
+            staging = Path(
+                tempfile.mkdtemp(
+                    prefix=f"{name}-{remote[:12]}-", dir=self.state_root / "staging"
+                )
+            )
+            if os.geteuid() == 0:
+                os.chown(staging, self.user_record.pw_uid, self.user_record.pw_gid)
+            archive = self.make_archive(checkout, product, remote, staging)
+            published_at = utc_now()
+            if product_type == "terminal":
+                receipt, manifest, readme = self.terminal_documents(
+                    product,
+                    remote,
+                    archive,
+                    len(tracked),
+                    validation,
+                    staging,
+                    published_at,
+                )
+            else:
+                receipt, manifest, readme = self.node_documents(
+                    product,
+                    remote,
+                    archive,
+                    len(tracked),
+                    validation,
+                    published_at,
+                )
+            write_json(staging / "release-receipt.json", receipt)
+            sums = [f"{archive['sha256']}  {archive['filename']}"]
+            if product_type == "terminal":
+                for relative in (
+                    validation.get(
+                        "profile_relative_path", "runtime/debian-13-amd64.json"
+                    ),
+                    validation.get(
+                        "lock_relative_path",
+                        "runtime/python-debian13-amd64-py313.lock",
+                    ),
+                    validation.get("aider_lock_relative_path"),
+                ):
+                    if isinstance(relative, str):
+                        sums.append(
+                            f"{sha256_file(staging / relative)}  {relative}"
+                        )
+            atomic_write(
+                staging / "SHA256SUMS",
+                ("\n".join(sums) + "\n").encode("utf-8"),
+            )
+            product_root = self.public_root / str(product["public_path"])
+            template_public_path = str(
+                product.get("installer_template_public_path", product["public_path"])
+            )
+            installer = self.installer_for(
+                self.public_root / template_public_path / "install.sh",
+                remote,
+                archive["sha256"],
+                base_url=f"https://downloads.techoverfl.com/{product['public_path']}",
+                macos=lane == "macos",
+            )
+            self.promote(product, remote, staging, manifest, installer, readme)
+            self.clear_failure(name)
+            return {
+                "product": name,
+                "status": "published",
+                "previous_commit": published,
+                "commit": remote,
+                "archive_sha256": archive["sha256"],
+            }
+        except QualificationError as exc:
+            self.record_failure(name, remote, str(exc))
+            return {
+                "product": name,
+                "status": "qualification_blocked",
+                "commit": remote,
+                "published_commit": published,
+                "reason": bounded_output(str(exc), 4000),
+            }
+        finally:
+            if checkout is not None:
+                shutil.rmtree(checkout, ignore_errors=True)
+            if staging is not None:
+                shutil.rmtree(staging, ignore_errors=True)
+
+    def sync(
+        self, selected: list[str], *, retry_failed: bool = False
+    ) -> list[dict[str, Any]]:
+        self.validate_environment(require_root=True)
+        lock_path = self.state_root / "locks" / "publisher.lock"
+        with lock_path.open("a+b") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise PublisherError("another publisher run is already active") from exc
+            return [
+                self.sync_one(name, retry_failed=retry_failed)
+                for name in selected
+            ]
+
+    def status(self, selected: list[str], *, include_remote: bool) -> list[dict[str, Any]]:
+        self.validate_environment(require_root=False)
+        results = []
+        for name in selected:
+            if name not in self.products:
+                raise PublisherError(f"unknown product: {name}")
+            item: dict[str, Any] = {
+                "product": name,
+                "published_commit": self.published_sha(self.products[name]),
+                "blocked_commit": self.failed_sha(name),
+            }
+            if include_remote:
+                item["github_commit"] = self.remote_sha(self.products[name])
+            results.append(item)
+        return results
+
+
+def parse_pytest_counts(output: str) -> dict[str, int]:
+    passed = re.findall(r"(\d+) passed", output)
+    failed = re.findall(r"(\d+) failed", output)
+    skipped = re.findall(r"(\d+) skipped", output)
+    if not passed:
+        raise QualificationError("pytest completed without a parseable passed-test count")
+    return {
+        "passed": int(passed[-1]),
+        "failed": int(failed[-1]) if failed else 0,
+        "skipped": int(skipped[-1]) if skipped else 0,
+    }
+
+
+def parse_node_counts(output: str) -> dict[str, int]:
+    def value(label: str) -> int:
+        matches = re.findall(rf"(?m)^# {label} (\d+)\s*$", output)
+        if not matches:
+            raise QualificationError(f"Node TAP output has no {label} count")
+        return int(matches[-1])
+
+    return {"passed": value("pass"), "failed": value("fail"), "skipped": value("skipped")}
+
+
+def parse_unittest_count(output: str) -> int:
+    matches = re.findall(r"Ran (\d+) tests?", output)
+    if not matches:
+        raise QualificationError("unittest output has no test count")
+    return int(matches[-1])
+
+
+def choose_products(publisher: Publisher, requested: list[str] | None) -> list[str]:
+    if not requested or "all" in requested:
+        return list(publisher.products)
+    unknown = set(requested) - set(publisher.products)
+    if unknown:
+        raise PublisherError("unknown products: " + ", ".join(sorted(unknown)))
+    return requested
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default=DEFAULT_CONFIG)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    sync_parser = subparsers.add_parser("sync", help="qualify and publish changed refs")
+    sync_parser.add_argument(
+        "--product", action="append"
+    )
+    sync_parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="retry a commit already recorded as qualification-blocked",
+    )
+    status_parser = subparsers.add_parser("status", help="show publication state")
+    status_parser.add_argument(
+        "--product", action="append"
+    )
+    status_parser.add_argument(
+        "--remote", action="store_true", help="also query GitHub over SSH"
+    )
+    arguments = parser.parse_args(argv)
+    try:
+        publisher = Publisher(Path(arguments.config))
+        selected = choose_products(publisher, arguments.product)
+        if arguments.command == "sync":
+            result = publisher.sync(selected, retry_failed=arguments.retry_failed)
+        else:
+            result = publisher.status(selected, include_remote=arguments.remote)
+        print(json.dumps(result, indent=2))
+        return 0
+    except (PublisherError, subprocess.TimeoutExpired) as exc:
+        print(f"publisher infrastructure error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

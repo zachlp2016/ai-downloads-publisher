@@ -1,0 +1,74 @@
+{
+  "state_root": "/var/lib/techoverfl-publisher",
+  "public_root": "/var/www/downloads.techoverfl.com/public",
+  "run_as_user": "zachlp2016",
+  "ssh_key": "/home/zachlp2016/.ssh/tof-ai-app_github",
+  "known_hosts": "/etc/techoverfl-publisher/github_known_hosts",
+  "ssh_hostname_override": "ssh.github.com",
+  "ssh_port": 443,
+  "node_binary": "/home/zachlp2016/.nvm/versions/node/v22.22.2/bin/node",
+  "products": {
+    "terminal": {
+      "product": "terminal",
+      "qualification_lane": "debian",
+      "repository_ssh": "git@github.com:zachlp2016/TOF-Terminal.git",
+      "repository_https": "https://github.com/zachlp2016/TOF-Terminal",
+      "ref": "refs/heads/main",
+      "public_path": "terminal",
+      "archive_prefix": "tof-terminal"
+    },
+    "node-adapters": {
+      "product": "node-adapters",
+      "qualification_lane": "debian",
+      "repository_ssh": "git@github.com:zachlp2016/techoverfl-agent-node.git",
+      "repository_https": "https://github.com/zachlp2016/techoverfl-agent-node",
+      "ref": "refs/heads/main",
+      "public_path": "node-adapters",
+      "archive_prefix": "tof-agent-node",
+      "debian_test_files": [
+        "test/api/v1/files_controller.test.js",
+        "test/bin/research_tools_runner.test.js",
+        "test/bin/tool_execution_runner.test.js",
+        "test/files/path_guard.test.js",
+        "test/files/root_resolver.test.js",
+        "test/install_script.test.js",
+        "test/platform_adapter.test.js",
+        "test/portable_timeout.test.js",
+        "test/research/adapter_factory.test.js",
+        "test/research/mcp_adapter.test.js",
+        "test/research/preflight.test.js",
+        "test/research/tavily_adapter.test.js",
+        "test/research_fetch_scrape_runner.test.js",
+        "test/research_general_runner.test.js",
+        "test/task_claim_output.test.js",
+        "test/task_heartbeat_identity.test.js",
+        "test/task_run_env_scope.test.js",
+        "test/task_run_heartbeat.test.js",
+        "test/task_run_workspace_lock.test.js",
+        "test/terminal_component.test.js",
+        "test/tools/execute_tool_request.test.js",
+        "test/tools/request_validator.test.js"
+      ]
+    },
+    "terminal-macos": {
+      "product": "terminal",
+      "qualification_lane": "macos",
+      "repository_ssh": "git@github.com:zachlp2016/TOF-Terminal.git",
+      "repository_https": "https://github.com/zachlp2016/TOF-Terminal",
+      "ref": "refs/heads/main",
+      "public_path": "terminal/macos",
+      "installer_template_public_path": "terminal/install.sh",
+      "archive_prefix": "tof-terminal"
+    },
+    "node-adapters-macos": {
+      "product": "node-adapters",
+      "qualification_lane": "macos",
+      "repository_ssh": "git@github.com:zachlp2016/techoverfl-agent-node.git",
+      "repository_https": "https://github.com/zachlp2016/techoverfl-agent-node",
+      "ref": "refs/heads/main",
+      "public_path": "node-adapters/macos",
+      "installer_template_public_path": "node-adapters/install.sh",
+      "archive_prefix": "tof-agent-node"
+    }
+  }
+}

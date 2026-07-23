@@ -1,0 +1,30 @@
+[Unit]
+Description=Qualify and publish TechOverFL GitHub release artifacts
+Documentation=file:/usr/local/share/doc/techoverfl-publisher/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/tof-release-publisher sync
+TimeoutStartSec=45min
+UMask=0022
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=read-only
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictRealtime=true
+LockPersonality=true
+ReadOnlyPaths=/home/zachlp2016/.ssh
+ReadWritePaths=/var/lib/techoverfl-publisher
+ReadWritePaths=/var/www/downloads.techoverfl.com/public
+
+[Install]
+WantedBy=multi-user.target

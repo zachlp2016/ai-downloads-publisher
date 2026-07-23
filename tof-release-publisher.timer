@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll GitHub for TechOverFL downloadable releases
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+RandomizedDelaySec=90s
+Persistent=true
+Unit=tof-release-publisher.service
+
+[Install]
+WantedBy=timers.target
