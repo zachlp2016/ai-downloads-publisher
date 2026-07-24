@@ -107,3 +107,15 @@ sudo /usr/local/sbin/tof-release-publisher sync \
   --product terminal-ubuntu \
   --retry-failed
 ```
+
+Atomically re-render only the mutable installer pointer for a release whose
+source commit is already current:
+
+```bash
+sudo /usr/local/sbin/tof-release-publisher sync \
+  --product terminal-macos \
+  --refresh-installer
+```
+
+This does not rebuild or replace the immutable archive, release receipt, or
+manifest. It exists for publisher-side portability and installer maintenance.

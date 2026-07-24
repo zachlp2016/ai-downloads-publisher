@@ -1254,6 +1254,55 @@ class Publisher:
                 )
         return text.encode("utf-8")
 
+    def refresh_installer(
+        self,
+        name: str,
+        product: dict[str, Any],
+        commit: str,
+    ) -> dict[str, Any]:
+        product_root = self.public_root / relative_path(
+            str(product["public_path"]), "public_path"
+        )
+        manifest_path = product_root / "manifest.json"
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            raise PublisherError(
+                f"published manifest is not a regular non-symlink file: {manifest_path}"
+            )
+        manifest = load_json(manifest_path)
+        if manifest.get("commit") != commit:
+            raise PublisherError(
+                f"published manifest commit does not match current ref: {manifest_path}"
+            )
+        archive = manifest.get("archive")
+        archive_sha = archive.get("sha256") if isinstance(archive, dict) else None
+        if not isinstance(archive_sha, str) or not HEX256_RE.fullmatch(archive_sha):
+            raise PublisherError(
+                f"published manifest has an invalid archive SHA-256: {manifest_path}"
+            )
+        installer = self.installer_for(
+            self.installer_template_path(product),
+            commit,
+            archive_sha,
+            base_url=f"https://downloads.techoverfl.com/{product['public_path']}",
+            portable_checksum=bool(product.get("portable_checksum")),
+        )
+        installer_path = product_root / "install.sh"
+        if installer_path.is_symlink() or not installer_path.is_file():
+            raise PublisherError(
+                f"published installer is not a regular non-symlink file: {installer_path}"
+            )
+        if installer_path.read_bytes() == installer:
+            status = "installer_current"
+        else:
+            atomic_write(installer_path, installer, 0o755)
+            status = "installer_refreshed"
+        return {
+            "product": name,
+            "status": status,
+            "commit": commit,
+            "archive_sha256": archive_sha,
+        }
+
     def other_platforms(self, product: dict[str, Any]) -> dict[str, str]:
         current_lane = product["qualification_lane"]
         return {
@@ -1602,6 +1651,7 @@ archive without installing.
         *,
         retry_failed: bool = False,
         dry_run: bool = False,
+        refresh_installer: bool = False,
     ) -> dict[str, Any]:
         if name not in self.products:
             raise PublisherError(f"unknown product: {name}")
@@ -1610,6 +1660,12 @@ archive without installing.
         published = self.published_sha(product)
         if remote == published:
             self.clear_failure(name)
+            if refresh_installer:
+                if dry_run:
+                    raise PublisherError(
+                        "--refresh-installer and --dry-run cannot be used together"
+                    )
+                return self.refresh_installer(name, product, remote)
             return {
                 "product": name,
                 "status": "current",
@@ -1744,6 +1800,7 @@ archive without installing.
         *,
         retry_failed: bool = False,
         dry_run: bool = False,
+        refresh_installer: bool = False,
     ) -> list[dict[str, Any]]:
         self.validate_environment(require_root=True)
         lock_path = self.state_root / "locks" / "publisher.lock"
@@ -1757,6 +1814,7 @@ archive without installing.
                     name,
                     retry_failed=retry_failed,
                     dry_run=dry_run,
+                    refresh_installer=refresh_installer,
                 )
                 for name in selected
             ]
@@ -1835,6 +1893,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="qualify and build without promoting public files",
     )
+    sync_parser.add_argument(
+        "--refresh-installer",
+        action="store_true",
+        help="atomically re-render install.sh when the published commit is current",
+    )
     status_parser = subparsers.add_parser("status", help="show publication state")
     status_parser.add_argument(
         "--product", action="append"
@@ -1851,6 +1914,7 @@ def main(argv: list[str] | None = None) -> int:
                 selected,
                 retry_failed=arguments.retry_failed,
                 dry_run=arguments.dry_run,
+                refresh_installer=arguments.refresh_installer,
             )
         else:
             result = publisher.status(selected, include_remote=arguments.remote)

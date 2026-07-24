@@ -210,6 +210,62 @@ printf '%s  %s\\n' "${ARCHIVE_SHA256}" "${archive_path}" | sha256sum --check --s
             (self.public / "terminal" / "install.sh").resolve(),
         )
 
+    def test_current_release_installer_can_be_refreshed_without_republishing(self):
+        commit = "b" * 40
+        archive_sha = "c" * 64
+        product = self.publisher.products["terminal-macos"]
+        product["installer_template_public_path"] = "terminal/install.sh"
+        product["portable_checksum"] = True
+        template = self.public / "terminal" / "install.sh"
+        template.parent.mkdir()
+        template.write_text(
+            """#!/usr/bin/env bash
+readonly BASE_URL="https://downloads.techoverfl.com/terminal"
+readonly RELEASE_COMMIT="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+readonly RELEASE_SHORT="aaaaaaaaaaaa"
+readonly ARCHIVE_SHA256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+for required_command in curl sha256sum tar mktemp awk; do
+  :
+done
+printf '%s  %s\\n' "${ARCHIVE_SHA256}" "${archive_path}" | sha256sum --check --status
+""",
+            encoding="utf-8",
+        )
+        product_root = self.public / "terminal" / "macos"
+        product_root.mkdir()
+        (product_root / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "commit": commit,
+                    "archive": {"sha256": archive_sha},
+                }
+            ),
+            encoding="utf-8",
+        )
+        installer = product_root / "install.sh"
+        installer.write_text("stale installer\n", encoding="utf-8")
+
+        result = self.publisher.refresh_installer(
+            "terminal-macos", product, commit
+        )
+
+        self.assertEqual(result["status"], "installer_refreshed")
+        rendered = installer.read_text(encoding="utf-8")
+        self.assertIn(
+            'readonly BASE_URL="https://downloads.techoverfl.com/terminal/macos"',
+            rendered,
+        )
+        self.assertLess(
+            rendered.index("if command -v shasum"),
+            rendered.index("elif command -v sha256sum"),
+        )
+        self.assertEqual(
+            self.publisher.refresh_installer(
+                "terminal-macos", product, commit
+            )["status"],
+            "installer_current",
+        )
+
     def test_mac_promotion_cannot_change_debian_pointer(self):
         commit = "d" * 40
         debian_manifest = self.public / "terminal" / "manifest.json"
