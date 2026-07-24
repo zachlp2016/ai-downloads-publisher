@@ -15,8 +15,8 @@ qualification fail-closed.
 Current source commits:
 
 ```text
-TOF Terminal  86e59fffe092448f4931edf8954b82acefc0635d
-Agent Node    82b38647cc7feac1ce629a97168ff6f6a82f0582
+TOF Terminal  fa9c009aff3348437ab8a23f833eaf4062270695
+Agent Node    ac24a3d8dfd22902f4b658d74d7f99d5f2c7d124
 ```
 
 The publisher host is Debian 13 amd64. It may run only the lane declared native

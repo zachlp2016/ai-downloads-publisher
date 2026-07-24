@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "status": "qualified_candidate",
+  "product": "node-adapters",
+  "qualification_lane": "macos",
+  "source_commit": "ac24a3d8dfd22902f4b658d74d7f99d5f2c7d124",
+  "source_git_tree": "b2d690128623f31a72f5d7a174764c100107bedd",
+  "source_composite_tree_sha256": "609a9c5884aa050359ee3ebc06eebe3805cac79598aa1f64f69196b1dcdd4d41",
+  "runtime_profile": "macos-26-arm64-python3.14",
+  "terminal_source_commit": "fa9c009aff3348437ab8a23f833eaf4062270695",
+  "node_version": "22.22.2",
+  "dependency_locks": {
+    "aider_python": "3.12",
+    "aider_package_count": 108,
+    "aider_lock_sha256": "1e9a7696ce0b543c095ec1cbca98f5c68f6d2930a49443b95b4bd2fcb4adc84a"
+  },
+  "qualification": {
+    "status": "passed",
+    "native_host": "Darwin arm64",
+    "tests": {
+      "passed": 124,
+      "failed": 0,
+      "skipped": 0,
+      "terminal_reconciliation_aider_install_platform_timeout": 91,
+      "fixed_two_job_adapter": 13,
+      "component_identity_and_model_registry": 20
+    },
+    "mac_release_path_admission_tests": {
+      "passed": 3,
+      "failed": 0
+    },
+    "source_change_scope": "Mac read-only browser identity with fully bound contained framework symlinks; escaping links, hardlinks, special entries, and drift remain fail-closed",
+    "git_diff_check": "passed"
+  }
+}
