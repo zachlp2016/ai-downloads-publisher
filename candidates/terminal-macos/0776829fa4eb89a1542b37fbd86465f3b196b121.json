@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "status": "qualified_candidate",
+  "product": "terminal",
+  "qualification_lane": "macos",
+  "source_commit": "0776829fa4eb89a1542b37fbd86465f3b196b121",
+  "source_git_tree": "c37be7308eb32eb89b401d190cf171dc71daeec6",
+  "runtime_profile": "macos-26-arm64-python3.14",
+  "dependency_locks": {
+    "aider_python": "3.12",
+    "aider_package_count": 108,
+    "aider_lock_sha256": "1e9a7696ce0b543c095ec1cbca98f5c68f6d2930a49443b95b4bd2fcb4adc84a"
+  },
+  "qualification": {
+    "status": "passed",
+    "native_host": "Darwin arm64",
+    "pytest": {
+      "passed": 334,
+      "failed": 0,
+      "skipped": 2
+    },
+    "excluded_platform_qualification": {
+      "debian_runtime_profile": "not_run_on_macos"
+    },
+    "aider_lock_dry_run": "passed",
+    "aider_lock_install_flags": [
+      "--require-hashes",
+      "--strict",
+      "--only-binary=:all:"
+    ],
+    "loopback_boundary_tests": {
+      "passed": 2,
+      "note": "Included in the Mac/shared total outside the filesystem/network sandbox because the tests bind ephemeral 127.0.0.1 ports."
+    },
+    "browser_launch_authority": {
+      "focused_tests_passed": 14,
+      "released_payload_live_smoke": "passed",
+      "contract": "playwright_package_and_successful_launch"
+    },
+    "node_managed_external_python_runtime": {
+      "focused_tests_passed": 4,
+      "release_tree_mutation": "forbidden",
+      "runtime_owner": "agent_node"
+    },
+    "git_diff_check": "passed"
+  }
+}
