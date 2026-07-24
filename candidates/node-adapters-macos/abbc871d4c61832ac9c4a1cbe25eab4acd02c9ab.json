@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "status": "qualified_candidate",
+  "product": "node-adapters",
+  "qualification_lane": "macos",
+  "source_commit": "abbc871d4c61832ac9c4a1cbe25eab4acd02c9ab",
+  "source_git_tree": "1a2dd745eb74a7b7e3460836e8e076f0e2ab767f",
+  "source_composite_tree_sha256": "a14704d550058ca9d2fc1382920657b7754dc182ebc7f835d4b47df243512750",
+  "runtime_profile": "macos-26-arm64-python3.14",
+  "terminal_source_commit": "0776829fa4eb89a1542b37fbd86465f3b196b121",
+  "node_version": "22.22.2",
+  "dependency_locks": {
+    "aider_python": "3.12",
+    "aider_package_count": 108,
+    "aider_lock_sha256": "1e9a7696ce0b543c095ec1cbca98f5c68f6d2930a49443b95b4bd2fcb4adc84a"
+  },
+  "qualification": {
+    "status": "passed",
+    "native_host": "Darwin arm64",
+    "tests": {
+      "passed": 124,
+      "failed": 0,
+      "skipped": 0,
+      "terminal_reconciliation": 50,
+      "aider_install_platform_timeout_two_job": 54,
+      "component_identity_and_model_registry": 20
+    },
+    "mac_release_path_admission_tests": {
+      "passed": 3,
+      "failed": 0
+    },
+    "source_change_scope": "Mac doctor admission validates required semantic fields while accepting additive Terminal capability diagnostics; Linux adapters and protected overlays are unchanged",
+    "git_diff_check": "passed"
+  }
+}
