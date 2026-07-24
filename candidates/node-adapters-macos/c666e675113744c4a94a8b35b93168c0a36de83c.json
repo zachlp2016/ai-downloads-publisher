@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "status": "qualified_candidate",
+  "product": "node-adapters",
+  "qualification_lane": "macos",
+  "source_commit": "c666e675113744c4a94a8b35b93168c0a36de83c",
+  "source_git_tree": "dd58d4d1af16b07e6de99a685f9f4ab4a92e24a0",
+  "source_composite_tree_sha256": "b9709a4f6481c273e49c9870e40399ee3f8337aed9431419d028fc0f97d709dd",
+  "runtime_profile": "macos-26-arm64-python3.14",
+  "terminal_source_commit": "0776829fa4eb89a1542b37fbd86465f3b196b121",
+  "node_version": "26.5.0",
+  "dependency_locks": {
+    "aider_python": "3.12",
+    "aider_package_count": 108,
+    "aider_lock_sha256": "1e9a7696ce0b543c095ec1cbca98f5c68f6d2930a49443b95b4bd2fcb4adc84a"
+  },
+  "qualification": {
+    "status": "passed",
+    "native_host": "Darwin arm64",
+    "tests": {
+      "passed": 126,
+      "failed": 0,
+      "skipped": 0,
+      "terminal_reconciliation": 50,
+      "aider_install_platform_timeout_two_job_and_heartbeat": 56,
+      "component_identity_and_model_registry": 20
+    },
+    "mac_release_path_admission_tests": {
+      "passed": 3,
+      "failed": 0
+    },
+    "source_change_scope": "Mac enrollment and heartbeat publish the truthful Rails HTTPS JSON lease protocol with bearer auth while MCP features remain false; Linux adapters and protected overlays are unchanged",
+    "git_diff_check": "passed"
+  }
+}
