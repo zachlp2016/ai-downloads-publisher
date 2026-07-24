@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "status": "qualified_candidate",
+  "product": "node-adapters",
+  "qualification_lane": "macos",
+  "source_commit": "b1169464ed8f93fb596a9a0cd1ec588ecad2cae5",
+  "source_git_tree": "4d52e22f7605d31a96511852297dc435cdd452bd",
+  "source_composite_tree_sha256": "d0ce205cd6446effc46a17b81693aa272133464617488530956048a75f0f3331",
+  "runtime_profile": "macos-26-arm64-python3.14",
+  "terminal_source_commit": "0776829fa4eb89a1542b37fbd86465f3b196b121",
+  "node_version": "26.5.0",
+  "dependency_locks": {
+    "aider_python": "3.12",
+    "aider_package_count": 108,
+    "aider_lock_sha256": "1e9a7696ce0b543c095ec1cbca98f5c68f6d2930a49443b95b4bd2fcb4adc84a"
+  },
+  "qualification": {
+    "status": "passed",
+    "native_host": "Darwin arm64",
+    "tests": {
+      "passed": 132,
+      "failed": 0,
+      "skipped": 0,
+      "mac_shared_javascript": 112,
+      "component_identity_and_model_registry": 20
+    },
+    "mac_release_path_admission_tests": {
+      "passed": 3,
+      "failed": 0
+    },
+    "source_change_scope": "The Mac task runtime derives TOF_PYTHON from the receipt-validated active Terminal component and preserves it through the isolated fixed task adapter; job authority, model assignment, Terminal operations, and protected Linux overlays are unchanged",
+    "git_diff_check": "passed"
+  }
+}
