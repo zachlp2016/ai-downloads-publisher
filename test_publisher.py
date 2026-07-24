@@ -197,13 +197,17 @@ printf '%s  %s\\n' "${ARCHIVE_SHA256}" "${archive_path}" | sha256sum --check --s
         self.assertIn("command -v shasum", rendered)
         self.assertIn("printf '%s  %s\\n'", rendered)
         self.assertNotIn("curl sha256sum tar", rendered)
+        self.assertLess(
+            rendered.index("if command -v shasum"),
+            rendered.index("elif command -v sha256sum"),
+        )
 
     def test_shared_installer_template_is_a_file_path(self):
         product = self.publisher.products["terminal-macos"]
         product["installer_template_public_path"] = "terminal/install.sh"
         self.assertEqual(
             self.publisher.installer_template_path(product),
-            self.public / "terminal" / "install.sh",
+            (self.public / "terminal" / "install.sh").resolve(),
         )
 
     def test_mac_promotion_cannot_change_debian_pointer(self):
