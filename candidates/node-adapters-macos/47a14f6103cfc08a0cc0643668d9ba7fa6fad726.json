@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "status": "qualified_candidate",
+  "product": "node-adapters",
+  "qualification_lane": "macos",
+  "source_commit": "47a14f6103cfc08a0cc0643668d9ba7fa6fad726",
+  "source_git_tree": "5000390950a5808fb8ece414bb0980081550e65b",
+  "source_composite_tree_sha256": "ab7650d2996634eb23ac8d60a05706f4ce2c364c5c4ec21e0869c86fcd14dd92",
+  "runtime_profile": "macos-26-arm64-python3.14",
+  "terminal_source_commit": "ceb256b224bf2bdd632077b88c7e55c26f1c9d19",
+  "node_version": "22.22.2",
+  "dependency_locks": {
+    "aider_python": "3.12",
+    "aider_package_count": 108,
+    "aider_lock_sha256": "1e9a7696ce0b543c095ec1cbca98f5c68f6d2930a49443b95b4bd2fcb4adc84a"
+  },
+  "qualification": {
+    "status": "passed",
+    "native_host": "Darwin arm64",
+    "tests": {
+      "passed": 120,
+      "failed": 0,
+      "skipped": 0,
+      "terminal_reconciliation_aider_install_platform_timeout": 88,
+      "fixed_two_job_adapter": 13,
+      "component_identity_and_model_registry": 19
+    },
+    "mac_release_path_admission_tests": {
+      "passed": 3,
+      "failed": 0
+    },
+    "source_change_scope": "standalone documentation and provenance binding only",
+    "git_diff_check": "passed"
+  }
+}
