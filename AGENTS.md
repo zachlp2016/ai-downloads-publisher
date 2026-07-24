@@ -16,7 +16,7 @@ Current source commits:
 
 ```text
 TOF Terminal  0776829fa4eb89a1542b37fbd86465f3b196b121
-Agent Node    abbc871d4c61832ac9c4a1cbe25eab4acd02c9ab
+Agent Node    e206556322188fe52690be034530775994d5c526
 ```
 
 The publisher host is Debian 13 amd64. It may run only the lane declared native

@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "status": "qualified_candidate",
+  "product": "node-adapters",
+  "qualification_lane": "macos",
+  "source_commit": "e206556322188fe52690be034530775994d5c526",
+  "source_git_tree": "e58d5fc3e61851ce05fa48de7aea33f3b615d56d",
+  "source_composite_tree_sha256": "5a52e6e37da4125619f7785997614e20c3c48b50fda933223c2991a433acec08",
+  "runtime_profile": "macos-26-arm64-python3.14",
+  "terminal_source_commit": "0776829fa4eb89a1542b37fbd86465f3b196b121",
+  "node_version": "22.22.2",
+  "dependency_locks": {
+    "aider_python": "3.12",
+    "aider_package_count": 108,
+    "aider_lock_sha256": "1e9a7696ce0b543c095ec1cbca98f5c68f6d2930a49443b95b4bd2fcb4adc84a"
+  },
+  "qualification": {
+    "status": "passed",
+    "native_host": "Darwin arm64",
+    "tests": {
+      "passed": 124,
+      "failed": 0,
+      "skipped": 0,
+      "terminal_reconciliation": 50,
+      "aider_install_platform_timeout_two_job": 54,
+      "component_identity_and_model_registry": 20
+    },
+    "mac_release_path_admission_tests": {
+      "passed": 3,
+      "failed": 0
+    },
+    "source_change_scope": "Mac authoritative Terminal doctor disables Python bytecode writes so immutable admitted source remains exact; Linux adapters and protected overlays are unchanged",
+    "git_diff_check": "passed"
+  }
+}
