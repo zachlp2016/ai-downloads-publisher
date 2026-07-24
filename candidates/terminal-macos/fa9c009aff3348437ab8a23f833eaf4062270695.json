@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "status": "qualified_candidate",
+  "product": "terminal",
+  "qualification_lane": "macos",
+  "source_commit": "fa9c009aff3348437ab8a23f833eaf4062270695",
+  "source_git_tree": "e433d52e142e90faf7a3650c41c78506635c6fd2",
+  "runtime_profile": "macos-26-arm64-python3.14",
+  "dependency_locks": {
+    "aider_python": "3.12",
+    "aider_package_count": 108,
+    "aider_lock_sha256": "1e9a7696ce0b543c095ec1cbca98f5c68f6d2930a49443b95b4bd2fcb4adc84a"
+  },
+  "qualification": {
+    "status": "passed",
+    "native_host": "Darwin arm64",
+    "pytest": {
+      "passed": 335,
+      "failed": 0,
+      "skipped": 2
+    },
+    "aider_lock_dry_run": "passed",
+    "aider_lock_install_flags": [
+      "--require-hashes",
+      "--strict",
+      "--only-binary=:all:"
+    ],
+    "loopback_boundary_tests": {
+      "passed": 2,
+      "note": "Included in the complete native suite outside the filesystem/network sandbox because the tests bind ephemeral 127.0.0.1 ports."
+    },
+    "node_managed_external_python_runtime": {
+      "focused_tests_passed": 4,
+      "release_tree_mutation": "forbidden",
+      "runtime_owner": "agent_node"
+    },
+    "git_diff_check": "passed"
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "status": "qualified_candidate",
+  "product": "node-adapters",
+  "qualification_lane": "macos",
+  "source_commit": "e1c076c13b43a3a9bf118510b9166dcedb478a62",
+  "source_git_tree": "85603d26bec080c966548b2f339c9966dcd64c74",
+  "source_composite_tree_sha256": "5cba4dccce0df8344b9b8a1d9d282dd77518ae779863856bdd1366245b0fe94e",
+  "runtime_profile": "macos-26-arm64-python3.14",
+  "terminal_source_commit": "fa9c009aff3348437ab8a23f833eaf4062270695",
+  "node_version": "22.22.2",
+  "dependency_locks": {
+    "aider_python": "3.12",
+    "aider_package_count": 108,
+    "aider_lock_sha256": "1e9a7696ce0b543c095ec1cbca98f5c68f6d2930a49443b95b4bd2fcb4adc84a"
+  },
+  "qualification": {
+    "status": "passed",
+    "native_host": "Darwin arm64",
+    "tests": {
+      "passed": 121,
+      "failed": 0,
+      "skipped": 0,
+      "terminal_reconciliation_aider_install_platform_timeout": 89,
+      "fixed_two_job_adapter": 13,
+      "component_identity_and_model_registry": 19
+    },
+    "mac_release_path_admission_tests": {
+      "passed": 3,
+      "failed": 0
+    },
+    "source_change_scope": "Mac external Python runtime staging, complete identity continuity, rollback, and fixed-adapter binding",
+    "git_diff_check": "passed"
+  }
+}
