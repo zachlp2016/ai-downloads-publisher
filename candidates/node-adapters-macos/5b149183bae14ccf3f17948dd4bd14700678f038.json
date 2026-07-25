@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "status": "qualified_candidate",
+  "product": "node-adapters",
+  "qualification_lane": "macos",
+  "source_commit": "5b149183bae14ccf3f17948dd4bd14700678f038",
+  "source_git_tree": "ae02afa81a0338d22d7c218de39feb0c4af1f1e0",
+  "source_composite_tree_sha256": "58b68965e5c74c153964329fcc96d6b40a97753529388f67edc6ddcd39eb1553",
+  "runtime_profile": "macos-26-arm64-python3.14",
+  "terminal_source_commit": "266130e6fb88f3737670030bf07f5e34f0dfce78",
+  "node_version": "26.5.0",
+  "dependency_locks": {
+    "aider_python": "3.12",
+    "aider_package_count": 108,
+    "aider_lock_sha256": "1e9a7696ce0b543c095ec1cbca98f5c68f6d2930a49443b95b4bd2fcb4adc84a"
+  },
+  "qualification": {
+    "status": "passed",
+    "native_host": "Darwin arm64",
+    "tests": {
+      "passed": 217,
+      "failed": 0,
+      "skipped": 0,
+      "mac_shared_javascript": 190,
+      "component_identity_model_registry_workspace": 27
+    },
+    "workspace_authorization": {
+      "focused_javascript_passed": 20,
+      "focused_python_passed": 7,
+      "terminal_fixture_file_passed": 12,
+      "native_helper_build_signature_child_smoke": "passed",
+      "aggregate_observation": "189 of 194 passed concurrently; four Debian-only sha256sum verifier cases were outside the Mac qualification set and one load-sensitive heartbeat assertion passed in its focused file"
+    },
+    "protected_linux_tree_sha256": "4ab512fc6e9242093429f88aa7ca2999350810d0b6b0e7eb2cec58a51715ffc7",
+    "source_change_scope": "Makes unchanged .tof/project-workspace.json marker content-idempotent so heartbeat reconciliation cannot trigger the terminal.query mutation guard. The two Terminal jobs, model assignment, scoped job authority, native folder authorization, and protected Linux overlays are unchanged.",
+    "git_diff_check": "passed"
+  }
+}

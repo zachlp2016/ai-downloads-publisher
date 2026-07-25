@@ -16,13 +16,15 @@ Current source commits:
 
 ```text
 TOF Terminal  266130e6fb88f3737670030bf07f5e34f0dfce78
-Agent Node    38314c97e108a34bd135ba12a8b8d485d8c67742
+Agent Node    5b149183bae14ccf3f17948dd4bd14700678f038
 ```
 
 The current Agent Node successor retains the Mac managed-build target connector
 and adds native exact-parent authorization for protected project workspaces.
 The prompt-free default is `~/AI Projects`; custom parents use a private
 security-scoped bookmark around reconciliation and task polling.
+Unchanged workspace markers are content-idempotent so routine heartbeat
+reconciliation cannot trip TOF-Terminal's read-only mutation guard.
 Their trusted candidate manifests are committed under
 `candidates/terminal-macos/` and `candidates/node-adapters-macos/`. Publish
 Terminal first, then Agent Node.
