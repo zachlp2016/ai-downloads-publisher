@@ -16,13 +16,15 @@ Current source commits:
 
 ```text
 TOF Terminal  266130e6fb88f3737670030bf07f5e34f0dfce78
-Agent Node    dd4fde2518c19f9c1c98e502eb8142c0adac792a
+Agent Node    f46686d2512c0bc25bbc9bf79595a7cfdd677ff3
 ```
 
 These July 24 successors carry the Mac managed-build target connector and the
-per-project visible workspace binding. Their trusted candidate manifests are
-committed under `candidates/terminal-macos/` and
-`candidates/node-adapters-macos/`. Publish Terminal first, then Agent Node.
+per-project visible workspace binding. The Agent Node successor additionally
+installs the workspace reconciler module consumed by its heartbeat wrapper.
+Their trusted candidate manifests are committed under
+`candidates/terminal-macos/` and `candidates/node-adapters-macos/`. Publish
+Terminal first, then Agent Node.
 
 The publisher host is Debian 13 amd64. It may run only the lane declared native
 for that host. Any other target requires a trusted exact-commit candidate from
