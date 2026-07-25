@@ -16,7 +16,7 @@ Current source commits:
 
 ```text
 TOF Terminal  266130e6fb88f3737670030bf07f5e34f0dfce78
-Agent Node    5b149183bae14ccf3f17948dd4bd14700678f038
+Agent Node    b4f95a22e936e9fcdf4873e73b6ef91c9d1bd864
 ```
 
 The current Agent Node successor retains the Mac managed-build target connector
@@ -25,6 +25,11 @@ The prompt-free default is `~/AI Projects`; custom parents use a private
 security-scoped bookmark around reconciliation and task polling.
 Unchanged workspace markers are content-idempotent so routine heartbeat
 reconciliation cannot trip TOF-Terminal's read-only mutation guard.
+Authenticated heartbeat desired state may project only human-published
+`SOUL.md` and `AGENTS.md` revisions into the node root or an exact
+receipt-bound Project workspace. Projection is content-idempotent, emits a
+private receipt, and grants no job, scope, placement, provider, model, or
+execution authority.
 Their trusted candidate manifests are committed under
 `candidates/terminal-macos/` and `candidates/node-adapters-macos/`. Publish
 Terminal first, then Agent Node.

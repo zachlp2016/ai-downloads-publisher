@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "status": "qualified_candidate",
+  "product": "node-adapters",
+  "qualification_lane": "macos",
+  "source_commit": "b4f95a22e936e9fcdf4873e73b6ef91c9d1bd864",
+  "source_git_tree": "44e6ac7ca150d6011226510d962e5ffe964ee86e",
+  "source_composite_tree_sha256": "b0d621879290cd95f4fe8ab16933538b7d245dacb57d0deff80efcb51b502cad",
+  "runtime_profile": "macos-26-arm64-python3.14",
+  "terminal_source_commit": "266130e6fb88f3737670030bf07f5e34f0dfce78",
+  "node_version": "26.5.0",
+  "dependency_locks": {
+    "aider_python": "3.12",
+    "aider_package_count": 108,
+    "aider_lock_sha256": "1e9a7696ce0b543c095ec1cbca98f5c68f6d2930a49443b95b4bd2fcb4adc84a"
+  },
+  "qualification": {
+    "status": "passed",
+    "native_host": "Darwin arm64",
+    "tests": {
+      "passed": 219,
+      "failed": 0,
+      "skipped": 0,
+      "mac_shared_javascript": 190,
+      "component_identity_model_registry_workspace_directives": 29
+    },
+    "directive_projection": {
+      "workspace_python_passed": 9,
+      "heartbeat_javascript_passed": 1,
+      "python_compile": "passed",
+      "heartbeat_shell_syntax": "passed"
+    },
+    "workspace_authorization": {
+      "native_helper_build_signature_child_smoke": "passed",
+      "aggregate_observation": "189 of 194 JavaScript tests passed concurrently; four Debian-only sha256sum verifier cases were outside the Mac qualification set and one load-sensitive Terminal cancellation assertion passed in its focused file"
+    },
+    "protected_linux_tree_sha256": "4ab512fc6e9242093429f88aa7ca2999350810d0b6b0e7eb2cec58a51715ffc7",
+    "source_change_scope": "Projects human-published SOUL.md and AGENTS.md desired state from authenticated Rails heartbeat responses into exact node or receipt-bound project paths with content-idempotent atomic writes and private receipts. Job assignment, scope, placement, provider/model selection, the two Terminal jobs, native workspace authorization, and protected Linux overlays are unchanged.",
+    "git_diff_check": "passed"
+  }
+}
