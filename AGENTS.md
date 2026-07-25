@@ -16,12 +16,13 @@ Current source commits:
 
 ```text
 TOF Terminal  266130e6fb88f3737670030bf07f5e34f0dfce78
-Agent Node    f46686d2512c0bc25bbc9bf79595a7cfdd677ff3
+Agent Node    38314c97e108a34bd135ba12a8b8d485d8c67742
 ```
 
-These July 24 successors carry the Mac managed-build target connector and the
-per-project visible workspace binding. The Agent Node successor additionally
-installs the workspace reconciler module consumed by its heartbeat wrapper.
+The current Agent Node successor retains the Mac managed-build target connector
+and adds native exact-parent authorization for protected project workspaces.
+The prompt-free default is `~/AI Projects`; custom parents use a private
+security-scoped bookmark around reconciliation and task polling.
 Their trusted candidate manifests are committed under
 `candidates/terminal-macos/` and `candidates/node-adapters-macos/`. Publish
 Terminal first, then Agent Node.

@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "status": "qualified_candidate",
+  "product": "node-adapters",
+  "qualification_lane": "macos",
+  "source_commit": "38314c97e108a34bd135ba12a8b8d485d8c67742",
+  "source_git_tree": "46e95f8551e02e39e5e079838f95971438973964",
+  "source_composite_tree_sha256": "b2610b82727a7e13cbb498221a78fc49da62b7ac23c5c8c3c630969d322fe886",
+  "runtime_profile": "macos-26-arm64-python3.14",
+  "terminal_source_commit": "266130e6fb88f3737670030bf07f5e34f0dfce78",
+  "node_version": "26.5.0",
+  "dependency_locks": {
+    "aider_python": "3.12",
+    "aider_package_count": 108,
+    "aider_lock_sha256": "1e9a7696ce0b543c095ec1cbca98f5c68f6d2930a49443b95b4bd2fcb4adc84a"
+  },
+  "qualification": {
+    "status": "passed",
+    "native_host": "Darwin arm64",
+    "tests": {
+      "passed": 216,
+      "failed": 0,
+      "skipped": 0,
+      "mac_shared_javascript": 190,
+      "component_identity_model_registry_workspace": 26
+    },
+    "workspace_authorization": {
+      "focused_javascript_passed": 20,
+      "focused_python_passed": 6,
+      "terminal_fixture_file_passed": 12,
+      "native_helper_build_signature_child_smoke": "passed",
+      "aggregate_observation": "189 of 194 passed concurrently; four Debian-only sha256sum verifier cases were outside the Mac qualification set and one load-sensitive heartbeat assertion passed in its focused file"
+    },
+    "protected_linux_tree_sha256": "4ab512fc6e9242093429f88aa7ca2999350810d0b6b0e7eb2cec58a51715ffc7",
+    "source_change_scope": "Adds the Mac native exact-parent folder picker, private security-scoped bookmark activation around workspace reconciliation and task polling, schema-v2 workspace receipts, the visible ~/AI Projects default, and immediate failure reporting for a claimed Terminal preflight. The two Terminal jobs, model assignment, scoped job authority, and protected Linux overlays are unchanged.",
+    "git_diff_check": "passed"
+  }
+}
