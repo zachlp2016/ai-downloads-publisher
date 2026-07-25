@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "status": "qualified_candidate",
+  "product": "terminal",
+  "qualification_lane": "macos",
+  "source_commit": "266130e6fb88f3737670030bf07f5e34f0dfce78",
+  "source_git_tree": "0e04fd67547c9465a822c2a9c7024b31f1127f4b",
+  "runtime_profile": "macos-26-arm64-python3.14",
+  "dependency_locks": {
+    "aider_python": "3.12",
+    "aider_package_count": 108,
+    "aider_lock_sha256": "1e9a7696ce0b543c095ec1cbca98f5c68f6d2930a49443b95b4bd2fcb4adc84a"
+  },
+  "qualification": {
+    "status": "passed",
+    "native_host": "Darwin arm64",
+    "pytest": {
+      "passed": 335,
+      "failed": 0,
+      "skipped": 2
+    },
+    "excluded_platform_qualification": {
+      "debian_runtime_profile": "not_run_on_macos",
+      "ubuntu_runtime_profile": "not_run_on_macos"
+    },
+    "aider_lock_dry_run": "passed",
+    "aider_lock_install_flags": [
+      "--require-hashes",
+      "--strict",
+      "--only-binary=:all:"
+    ],
+    "loopback_boundary_tests": {
+      "passed": 2,
+      "note": "Passed separately outside the filesystem/network sandbox because the tests bind ephemeral 127.0.0.1 ports."
+    },
+    "managed_build_target_binding": {
+      "focused_tests_passed": 18,
+      "contract": "persisted post-handoff task-ballot targets are passed to the existing AiderCodeBuilder only for explicit managed builds",
+      "live_released_smoke": "pending_successor_publication"
+    },
+    "source_change_scope": "The Mac managed-build connector carries persisted workspace-relative inspection targets into the existing node-owned Aider mutation lane; local goal semantics, job authority, model assignment, and platform adapters are unchanged",
+    "git_diff_check": "passed"
+  }
+}
